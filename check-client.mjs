@@ -80,7 +80,7 @@ check('colors only inside the dsn palette block', hasPalette && colorLiterals.le
 check('palette defines paper / head / ink tokens', /--dsn-paper:/.test(paletteBlock) && /--dsn-paper-head:/.test(paletteBlock) && /--dsn-ink:/.test(paletteBlock), 'missing token')
 
 // 7. 便签配色三处一致：CSS 类、客户端 PAPERS、Host 端白名单
-const cssPapers = [...paletteBlock.matchAll(/\.dsn-paper-([a-z]+)\s*\{/g)].map((m) => m[1])
+const cssPapers = [...new Set([...paletteBlock.matchAll(/\.dsn-paper-([a-z]+)\s*\{/g)].map((m) => m[1]))]
 const papersBlock = client.match(/const PAPERS = \[([\s\S]*?)\n    \]/)
 const clientPapers = papersBlock ? [...papersBlock[1].matchAll(/id: '([a-z]+)'/g)].map((m) => m[1]) : []
 const hostColors = index.match(/const PAPER_COLORS = new Set\(\[([^\]]*)\]\)/)
@@ -88,9 +88,23 @@ const hostPapers = hostColors ? [...hostColors[1].matchAll(/'([a-z]+)'/g)].map((
 const sameSet = (a, b) => a.length === b.length && a.length > 0 && a.every((item) => b.includes(item))
 check('paper colors CSS === client PAPERS', sameSet(cssPapers, clientPapers), `${cssPapers} vs ${clientPapers}`)
 check('paper colors client === host whitelist', sameSet(clientPapers, hostPapers), `${clientPapers} vs ${hostPapers}`)
+const darkPapers = [...new Set([...paletteBlock.matchAll(/data-tone="dark"\]\s+\.dsn-paper-([a-z]+)/g)].map((m) => m[1]))]
+check('dark tone covers every paper', sameSet(darkPapers, cssPapers), `${darkPapers} vs ${cssPapers}`)
 
 // 8. 客户端路由与宿主前缀一致
-check('api path under host prefix', client.includes("'/api/dsh-sticky-notes/state'") && [...client.matchAll(/const API_PATH = '([^']+)'/g)].length === 1)
+const prefixLiteral = "const API_PREFIX = '/api/dsh-sticky-notes'"
+check('api prefix matches host', client.includes(prefixLiteral) && index.includes(prefixLiteral), 'prefix mismatch')
+check('client builds routes from the prefix', client.includes('`${API_PREFIX}/state`') && client.includes('`${NOTES_PATH}/'), 'route literal drift')
+check('host exposes per-note routes', index.includes('`${NOTES_PATH}/`') && index.includes('handleNote'), 'missing notes route')
+check('host exposes asset routes', index.includes('handleAssetUpload') && index.includes('handleAssetGet'), 'missing asset route')
+check('host exposes config routes', index.includes('handleConfigGet') && index.includes('handleConfigSet'), 'missing config route')
+check('client talks to the config route', client.includes('CONFIG_PATH') && client.includes('openStorage'), 'missing storage ui')
+
+// 9. 正文是纯文本，不许出现 dangerouslySetInnerHTML 之类的注入口子
+check('no dangerouslySetInnerHTML', !/dangerouslySetInnerHTML/.test(client))
+check('inputs capped by maxLength', /maxLength: MAX_TITLE/.test(client) && /maxLength: MAX_NOTE_BODY/.test(client))
+
+// 10. dsh 清单齐备
 
 // 9. dsh 清单齐备
 check('dsh.bundle.patch declared', pkg.dsh?.bundle?.patch === './cordis.patch.yml')
