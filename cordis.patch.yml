@@ -1,0 +1,4 @@
+# 便签插件：宿主半边注册 /api/dsh-sticky-notes 状态路由，客户端半边注册侧栏入口与便签页。
+- insert:
+    - id: sticky-notes
+      name: '@local/dsh-sticky-notes'
