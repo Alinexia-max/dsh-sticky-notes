@@ -14,6 +14,7 @@ window.__ModuleLoader__.load({
     const API_PATH = `${API_PREFIX}/state`
     const CONFIG_PATH = `${API_PREFIX}/config`
     const NOTES_PATH = `${API_PREFIX}/notes`
+    const TRASH_PATH = `${API_PREFIX}/trash`
     const ASSETS_PATH = `${API_PREFIX}/assets`
     const MARKER_HEADER = 'x-dsh-sticky-notes'
     const SAVE_DELAY = 600
@@ -32,6 +33,8 @@ window.__ModuleLoader__.load({
     const RETRY_DELAYS = [1000, 2000, 4000, 8000, 15000]
     /** 删除后撤销窗口。 */
     const UNDO_MS = 6000
+    /** 卡片上最多直出几条待办，剩下的折成 +N。 */
+    const MAX_TODO_ROWS = 6
     /** 同一个冲突连续出现这么多次就放弃自动合并，转为报错。 */
     const MAX_CONFLICT_ROUNDS = 4
 
@@ -111,6 +114,18 @@ window.__ModuleLoader__.load({
         storagePending: '还有未保存的改动，稍后再试',
         storageFailed: '切换目录失败',
         assetUnit: '张图片',
+        trash: '回收站',
+        trashTitle: '回收站',
+        trashEmpty: '回收站是空的',
+        trashRestore: '还原',
+        trashPurge: '彻底删除',
+        trashPurgeAll: '清空回收站',
+        trashClose: '关闭',
+        trashFailed: '回收站操作失败',
+        trashPurgeAllConfirm: '再点一次清空',
+        todoList: '待办清单',
+        todoToggle: '切换完成状态',
+        todoMore: '更多待办',
       },
       en: {
         nav: 'Notes',
@@ -170,6 +185,18 @@ window.__ModuleLoader__.load({
         storagePending: 'Unsaved changes are still pending, try again shortly',
         storageFailed: 'Failed to switch folder',
         assetUnit: 'images',
+        trash: 'Trash',
+        trashTitle: 'Trash',
+        trashEmpty: 'Trash is empty',
+        trashRestore: 'Restore',
+        trashPurge: 'Delete forever',
+        trashPurgeAll: 'Empty trash',
+        trashClose: 'Close',
+        trashFailed: 'Trash action failed',
+        trashPurgeAllConfirm: 'Click again to empty',
+        todoList: 'Tasks',
+        todoToggle: 'Toggle done',
+        todoMore: 'More tasks',
       },
     }
 
@@ -245,6 +272,12 @@ window.__ModuleLoader__.load({
 .dsn-thumb { display: block; width: 56px; height: 42px; border: 1px solid var(--dsn-paper-line); border-radius: 6px; object-fit: cover; }
 .dsn-chip { max-width: 100%; padding: 2px 8px; border-radius: 999px; background: var(--dsn-paper-line); color: inherit; font-size: 11px; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dsn-chip:hover { text-decoration: underline; }
+.dsn-todos { display: flex; flex: 0 0 auto; flex-direction: column; gap: 2px; padding: 0 12px 6px; }
+.dsn-todo { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; cursor: pointer; }
+.dsn-todo-check { flex: 0 0 auto; width: 13px; height: 13px; margin: 0; accent-color: var(--dsn-ink); cursor: pointer; }
+.dsn-todo-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsn-todo-text[data-done="true"] { text-decoration: line-through; opacity: 0.55; }
+.dsn-todo-more { font-size: 11px; opacity: 0.6; }
 .dsn-note-foot { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; padding: 0 14px 10px; color: inherit; font-size: 11px; opacity: 0.55; }
 .dsn-note-count { margin-left: auto; font-variant-numeric: tabular-nums; }
 .dsn-note-foot[data-limit="true"] { opacity: 0.85; font-weight: 600; }
@@ -276,6 +309,21 @@ window.__ModuleLoader__.load({
 .dsn-modal-status { color: var(--dsw-alias-label-primary); font-size: 12px; }
 .dsn-modal-status--error { color: var(--dsw-alias-state-error-primary); }
 .dsn-modal-foot { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+.dsn-modal-card--wide { max-width: 520px; }
+.dsn-btn--danger { border-color: var(--dsw-alias-state-error-primary); color: var(--dsw-alias-state-error-primary); }
+.dsn-btn--danger:hover:not(:disabled) { background: var(--dsw-alias-bg-layer-2); }
+.dsn-trash-list { display: flex; flex-direction: column; gap: 6px; max-height: 320px; margin: 0; padding: 0; overflow-y: auto; list-style: none; scrollbar-width: thin; }
+.dsn-trash-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; background: var(--dsw-alias-bg-base); }
+.dsn-trash-text { flex: 1 1 auto; min-width: 0; }
+.dsn-trash-name { overflow: hidden; color: var(--dsw-alias-label-primary); font-size: 12px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.dsn-trash-meta { color: var(--dsw-alias-label-secondary); font-size: 11px; }
+.dsn-trash-actions { display: flex; flex: 0 0 auto; gap: 6px; }
+.dsn-trash-empty { padding: 18px 0; color: var(--dsw-alias-label-secondary); font-size: 12px; text-align: center; }
+.dsn-trash-list { display: flex; flex-direction: column; gap: 6px; max-height: 320px; overflow-y: auto; padding-right: 2px; scrollbar-width: thin; }
+.dsn-trash-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; }
+.dsn-trash-main { flex: 1 1 auto; min-width: 0; }
+.dsn-trash-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.dsn-trash-time { color: var(--dsw-alias-label-secondary); font-size: 11px; }
 `
 
     /** 插件路由按页面基址解析，兼容 DSH 挂在反向代理子路径下的情况。 */
@@ -344,6 +392,32 @@ window.__ModuleLoader__.load({
 
     function isEmptyNote(note) {
       return note !== null && typeof note === 'object' && String(note.title || '').trim() === '' && String(note.body || '').trim() === ''
+    }
+
+    /** `- [ ]` / `- [x]` 待办行；不改数据结构，正文本身就是唯一事实。 */
+    const TODO_PATTERN = /^(\s*)[-*]\s+\[( |x|X)\]\s?(.*)$/
+
+    function todosOf(body) {
+      const lines = String(body || '').split('\n')
+      const todos = []
+      for (let index = 0; index < lines.length; index += 1) {
+        const match = TODO_PATTERN.exec(lines[index])
+        if (!match) continue
+        todos.push({ index, done: match[2].toLowerCase() === 'x', text: match[3].trim() })
+      }
+      return todos
+    }
+
+    /** 只翻转那一行的勾选标记，其余字符原样保留。 */
+    function toggleTodo(body, lineIndex) {
+      const lines = String(body || '').split('\n')
+      const line = lines[lineIndex]
+      if (typeof line !== 'string') return body
+      const match = TODO_PATTERN.exec(line)
+      if (!match) return body
+      const done = match[2].toLowerCase() === 'x'
+      lines[lineIndex] = `${match[1]}- [${done ? ' ' : 'x'}] ${match[3]}`
+      return lines.join('\n')
     }
 
     /** 正文里引用的截图（相对路径，由 Host 端 assets 路由提供）。 */
@@ -433,6 +507,8 @@ window.__ModuleLoader__.load({
       const nearLimit = bodyLength >= MAX_NOTE_BODY * 0.8
       const images = imagesOf(note.body)
       const links = linksOf(note.body)
+      const todos = todosOf(note.body)
+      const doneTodos = todos.filter((todo) => todo.done).length
       const cardRef = useRef(null)
       const bodyRef = useRef(null)
       /** 只有按在右下角缩放柄上的拖拽才算「用户改尺寸」。 */
@@ -618,6 +694,29 @@ window.__ModuleLoader__.load({
           onKeyDown: onBodyKeyDown,
           onPaste: onBodyPaste,
         }),
+        todos.length > 0
+          ? h(
+              'div',
+              { className: 'dsn-todos', role: 'group', 'aria-label': t('todoList') },
+              todos.slice(0, MAX_TODO_ROWS).map((todo) =>
+                h(
+                  'label',
+                  { className: 'dsn-todo', key: todo.index },
+                  h('input', {
+                    type: 'checkbox',
+                    className: 'dsn-todo-check',
+                    checked: todo.done,
+                    'aria-label': t('todoToggle'),
+                    onChange: () => props.onChange(note.id, { body: toggleTodo(note.body, todo.index) }),
+                  }),
+                  h('span', { className: 'dsn-todo-text', 'data-done': todo.done ? 'true' : 'false' }, todo.text || '—'),
+                ),
+              ),
+              todos.length > MAX_TODO_ROWS
+                ? h('div', { className: 'dsn-todo-more', title: t('todoMore') }, `+${todos.length - MAX_TODO_ROWS}`)
+                : null,
+            )
+          : null,
         images.length > 0 || links.length > 0
           ? h(
               'div',
@@ -660,6 +759,7 @@ window.__ModuleLoader__.load({
           'footer',
           { className: 'dsn-note-foot', 'data-limit': nearLimit ? 'true' : 'false' },
           formatTime(note.updatedAt),
+          todos.length > 0 ? h('span', null, `${doneTodos}/${todos.length}`) : null,
           props.matchCount > 0 ? h('span', null, `${props.matchCount} ${t('matchUnit')}`) : null,
           nearLimit ? h('span', { className: 'dsn-note-count' }, `${bodyLength}/${MAX_NOTE_BODY}`) : null,
         ),
@@ -725,6 +825,13 @@ window.__ModuleLoader__.load({
       const [storageInfo, setStorageInfo] = useState({ current: '', isDefault: true })
       const [storageBusy, setStorageBusy] = useState(false)
       const [storageMessage, setStorageMessage] = useState(null)
+      const [trashOpen, setTrashOpen] = useState(false)
+      const [trashEntries, setTrashEntries] = useState([])
+      const [trashCount, setTrashCount] = useState(0)
+      const [trashBusy, setTrashBusy] = useState(false)
+      const [trashMessage, setTrashMessage] = useState(null)
+      /** 「清空回收站」需要点两次，避免手滑把 30 天的退路一次性抹掉。 */
+      const [trashConfirmAll, setTrashConfirmAll] = useState(false)
 
       const panelRef = useRef(null)
       const boardRef = useRef(null)
@@ -786,6 +893,9 @@ window.__ModuleLoader__.load({
             throw new Error((payload && payload.error) || `HTTP ${response.status}`)
           }
           if (payload.data && Number.isFinite(payload.data.version)) versionRef.current = payload.data.version
+          if (payload.data && payload.data.removed === true && Number.isFinite(payload.data.trashCount)) {
+            setTrashCount(payload.data.trashCount)
+          }
           return {}
         }
         /** 服务端现状 + 本端还没发出去的改动 = 合并结果。 */
@@ -952,6 +1062,7 @@ window.__ModuleLoader__.load({
           const data = payload.data || {}
           const list = Array.isArray(data.notes) ? data.notes : []
           if (Number.isFinite(data.version)) versionRef.current = data.version
+          if (Number.isFinite(data.trashCount)) setTrashCount(data.trashCount)
           commit(list)
           const nextActive =
             activeIdRef.current && list.some((note) => note.id === activeIdRef.current)
@@ -1036,6 +1147,87 @@ window.__ModuleLoader__.load({
         }
       }, [load])
 
+      /** 拉一次回收站列表；打开弹窗和每次操作后都走这里。 */
+      const fetchTrash = useCallback(async () => {
+        const response = await fetch(resolveApiUrl(TRASH_PATH), {
+          headers: { accept: 'application/json' },
+          cache: 'no-store',
+        })
+        const payload = await response.json().catch(() => null)
+        if (!response.ok || !payload || payload.ok !== true) {
+          throw new Error((payload && payload.error) || `HTTP ${response.status}`)
+        }
+        const data = payload.data || {}
+        const entries = Array.isArray(data.entries) ? data.entries : []
+        if (Number.isFinite(data.version)) versionRef.current = data.version
+        setTrashEntries(entries)
+        setTrashCount(entries.length)
+      }, [])
+
+      const openTrash = useCallback(async () => {
+        setTrashOpen(true)
+        setTrashMessage(null)
+        setTrashConfirmAll(false)
+        setTrashBusy(true)
+        try {
+          await fetchTrash()
+        } catch (caught) {
+          setTrashMessage({
+            text: `${tRef.current('trashFailed')}：${String((caught && caught.message) || caught)}`,
+            error: true,
+          })
+        } finally {
+          setTrashBusy(false)
+        }
+      }, [fetchTrash])
+
+      /** 回收站写操作：restore 放回便签墙，purge 单条彻底删除，empty 清空。 */
+      const mutateTrash = useCallback(
+        async (action, id) => {
+          setTrashBusy(true)
+          setTrashMessage(null)
+          setTrashConfirmAll(false)
+          try {
+            if (action === 'restore') {
+              // 还原会重排便签列表，先把待保存的改动落盘，免得被重新拉取覆盖。
+              await flushRef.current()
+              if (pendingRef.current.size > 0) throw new Error(tRef.current('storagePending'))
+            }
+            const path =
+              action === 'restore'
+                ? `${TRASH_PATH}/${encodeURIComponent(id)}/restore`
+                : action === 'purge'
+                  ? `${TRASH_PATH}/${encodeURIComponent(id)}`
+                  : TRASH_PATH
+            const response = await fetch(resolveApiUrl(path), {
+              method: action === 'restore' ? 'POST' : 'DELETE',
+              // 还原是改列表的写接口，Host 端要求带 JSON 体与自定义头。
+              headers:
+                action === 'restore'
+                  ? { 'content-type': 'application/json', [MARKER_HEADER]: '1' }
+                  : { [MARKER_HEADER]: '1' },
+              body: action === 'restore' ? '{}' : undefined,
+            })
+            const payload = await response.json().catch(() => null)
+            if (!response.ok || !payload || payload.ok !== true) {
+              throw new Error((payload && payload.error) || `HTTP ${response.status}`)
+            }
+            const data = payload.data || {}
+            if (Number.isFinite(data.version)) versionRef.current = data.version
+            await fetchTrash()
+            if (action === 'restore') await load()
+          } catch (caught) {
+            setTrashMessage({
+              text: `${tRef.current('trashFailed')}：${String((caught && caught.message) || caught)}`,
+              error: true,
+            })
+          } finally {
+            setTrashBusy(false)
+          }
+        },
+        [fetchTrash, load],
+      )
+
       useEffect(() => {
         aliveRef.current = true
         void load()
@@ -1113,15 +1305,17 @@ window.__ModuleLoader__.load({
         }
       }, [menuId])
 
-      // 目录弹窗：Esc 关闭。
+      // 目录 / 回收站弹窗：Esc 关闭。
       useEffect(() => {
-        if (!storageOpen) return undefined
+        if (!storageOpen && !trashOpen) return undefined
         const onKeyDown = (event) => {
-          if (event.key === 'Escape') setStorageOpen(false)
+          if (event.key !== 'Escape') return
+          setStorageOpen(false)
+          setTrashOpen(false)
         }
         document.addEventListener('keydown', onKeyDown)
         return () => document.removeEventListener('keydown', onKeyDown)
-      }, [storageOpen])
+      }, [storageOpen, trashOpen])
 
       // 新建后把光标送进标题；用 ref 注册表拿控件，卡片本身保持 memo 不重渲染。
       useEffect(() => {
@@ -1222,6 +1416,8 @@ window.__ModuleLoader__.load({
         const list = notesRef.current
         const next = list.slice()
         next.splice(Math.min(entry.index, next.length), 0, entry.note)
+        // 删除已经落盘时回收站里已有这条，撤销会顺带把条目清掉，条数跟着减。
+        if (!pendingRef.current.has(entry.note.id)) setTrashCount((current) => (current > 0 ? current - 1 : 0))
         clearUndo()
         captureLayout()
         commit(next)
@@ -1529,6 +1725,16 @@ window.__ModuleLoader__.load({
               },
               t('storage'),
             ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsn-btn',
+                title: t('trashTitle'),
+                onClick: () => void openTrash(),
+              },
+              trashCount > 0 ? `${t('trash')} ${trashCount}` : t('trash'),
+            ),
             h('span', { className: 'dsn-grow' }),
             h(
               'span',
@@ -1658,6 +1864,121 @@ window.__ModuleLoader__.load({
                         onClick: () => void applyStorage(storagePath.trim()),
                       },
                       storageBusy ? t('storageBusy') : t('storageApply'),
+                    ),
+                  ),
+                ),
+              )
+            : null,
+          trashOpen
+            ? h(
+                'div',
+                {
+                  className: 'dsn-modal',
+                  onPointerDown: (event) => {
+                    if (event.target === event.currentTarget) setTrashOpen(false)
+                  },
+                },
+                h(
+                  'div',
+                  {
+                    className: 'dsn-modal-card dsn-modal-card--wide',
+                    role: 'dialog',
+                    'aria-modal': 'true',
+                    'aria-label': t('trashTitle'),
+                  },
+                  h(
+                    'div',
+                    { className: 'dsn-modal-title' },
+                    trashCount > 0 ? `${t('trashTitle')} · ${trashCount}` : t('trashTitle'),
+                  ),
+                  trashEntries.length === 0
+                    ? h('div', { className: 'dsn-trash-empty' }, trashBusy ? t('storageBusy') : t('trashEmpty'))
+                    : h(
+                        'ul',
+                        { className: 'dsn-trash-list' },
+                        trashEntries.map((entry) =>
+                          h(
+                            'li',
+                            { className: 'dsn-trash-item', key: entry.id },
+                            h(
+                              'div',
+                              { className: 'dsn-trash-text' },
+                              h(
+                                'div',
+                                { className: 'dsn-trash-name', title: titleKey(entry) || entry.id },
+                                titleKey(entry) || t('untitled'),
+                              ),
+                              h('div', { className: 'dsn-trash-meta' }, formatTime(entry.deletedAt)),
+                            ),
+                            h(
+                              'div',
+                              { className: 'dsn-trash-actions' },
+                              h(
+                                'button',
+                                {
+                                  type: 'button',
+                                  className: 'dsn-btn',
+                                  disabled: trashBusy,
+                                  onClick: () => void mutateTrash('restore', entry.id),
+                                },
+                                t('trashRestore'),
+                              ),
+                              h(
+                                'button',
+                                {
+                                  type: 'button',
+                                  className: 'dsn-btn dsn-btn--danger',
+                                  disabled: trashBusy,
+                                  onClick: () => void mutateTrash('purge', entry.id),
+                                },
+                                t('trashPurge'),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                  trashMessage
+                    ? h(
+                        'div',
+                        {
+                          className: trashMessage.error
+                            ? 'dsn-modal-status dsn-modal-status--error'
+                            : 'dsn-modal-status',
+                          role: 'status',
+                        },
+                        trashMessage.text,
+                      )
+                    : null,
+                  h(
+                    'div',
+                    { className: 'dsn-modal-foot' },
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'dsn-btn dsn-btn--danger',
+                        disabled: trashBusy || trashEntries.length === 0,
+                        onBlur: () => setTrashConfirmAll(false),
+                        onClick: () => {
+                          if (!trashConfirmAll) {
+                            setTrashConfirmAll(true)
+                            return
+                          }
+                          void mutateTrash('empty')
+                        },
+                      },
+                      trashConfirmAll ? t('trashPurgeAllConfirm') : t('trashPurgeAll'),
+                    ),
+                    h('span', { className: 'dsn-grow' }),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'dsn-btn',
+                        disabled: trashBusy,
+                        onClick: () => setTrashOpen(false),
+                      },
+                      t('trashClose'),
                     ),
                   ),
                 ),

@@ -12,6 +12,7 @@ const API_PREFIX = '/api/dsh-sticky-notes'
 const STATE_PATH = `${API_PREFIX}/state`
 const CONFIG_PATH = `${API_PREFIX}/config`
 const NOTES_PATH = `${API_PREFIX}/notes`
+const TRASH_PATH = `${API_PREFIX}/trash`
 const ASSETS_PATH = `${API_PREFIX}/assets`
 /** 写请求必须带的自定义头：跨站 fetch 因此被迫走预检，而本路由不回 CORS。 */
 const CLIENT_MARKER_HEADER = 'x-dsh-sticky-notes'
@@ -19,6 +20,11 @@ const MAX_NOTES = 200
 const MAX_TITLE = 200
 const MAX_NOTE_BODY = 20000
 const MAX_ID = 128
+/** 回收站：最多留 30 条、30 天。 */
+const MAX_TRASH = 30
+const TRASH_TTL_MS = 30 * 24 * 60 * 60 * 1000
+/** 写前快照份数：每次写盘前把上一份轮转成 notes.bak.1..N。 */
+const SNAPSHOT_COUNT = 3
 /**
  * 整份覆盖（导入/兼容）的请求体上限必须能装下最坏情况：200 条 × 20000 字，
  * 中文按 UTF-8 3 字节、加上转义与字段名约 12MB，取 16MB 留余量。
@@ -418,7 +424,7 @@ async function readDoc(filePath) {
   try {
     raw = await readFile(filePath, 'utf8')
   } catch (caught) {
-    if (caught && caught.code === 'ENOENT') return { version: 0, notes: [] }
+    if (caught && caught.code === 'ENOENT') return { version: 0, notes: [], trash: [] }
     throw caught
   }
   try {
@@ -426,19 +432,55 @@ async function readDoc(filePath) {
     return {
       version: Number.isFinite(parsed && parsed.version) ? parsed.version : 0,
       notes: sanitizeNotes(parsed),
+      trash: sanitizeTrash(parsed && parsed.trash),
     }
   } catch {
     const backup = await backupCorrupt(filePath)
-    return { version: 0, notes: [], recovered: true, backup }
+    return { version: 0, notes: [], trash: [], recovered: true, backup }
   }
 }
 
-/** 原子写：先落临时文件再 rename，避免写到一半留下半个 JSON。 */
+/** 回收站条目 = 便签本体 + deletedAt；过期和超量的直接丢掉。 */
+function sanitizeTrash(input) {
+  if (!Array.isArray(input)) return []
+  const now = Date.now()
+  const seen = new Set()
+  const entries = []
+  for (const raw of input) {
+    if (raw === null || typeof raw !== 'object') continue
+    let note
+    try {
+      note = sanitizeNote(raw)
+    } catch {
+      continue
+    }
+    if (seen.has(note.id)) continue
+    seen.add(note.id)
+    const deletedAt = Number.isFinite(raw.deletedAt) ? raw.deletedAt : now
+    if (now - deletedAt > TRASH_TTL_MS) continue
+    entries.push(Object.assign({}, note, { deletedAt }))
+  }
+  return entries.slice(0, MAX_TRASH)
+}
+
+/** 写盘前把上一份文件轮转成 notes.bak.1..N，坏文件/误改还有得回。 */
+async function rotateSnapshots(filePath) {
+  const dir = dirname(filePath)
+  const snapshot = (index) => join(dir, `notes.bak.${index}.json`)
+  await rm(snapshot(SNAPSHOT_COUNT), { force: true })
+  for (let index = SNAPSHOT_COUNT - 1; index >= 1; index -= 1) {
+    await rename(snapshot(index), snapshot(index + 1)).catch(() => undefined)
+  }
+  await copyFile(filePath, snapshot(1)).catch(() => undefined)
+}
+
+/** 原子写：先轮转快照、落临时文件，再 rename，避免写到一半留下半个 JSON。 */
 async function writeDoc(filePath, doc) {
   const dir = dirname(filePath)
   await mkdir(dir, { recursive: true })
+  await rotateSnapshots(filePath)
   const tmp = join(dir, `.notes.${process.pid}.${Date.now().toString(36)}.tmp`)
-  const payload = `${JSON.stringify({ version: doc.version, notes: doc.notes }, null, 2)}\n`
+  const payload = `${JSON.stringify({ version: doc.version, notes: doc.notes, trash: doc.trash || [] }, null, 2)}\n`
   await writeFile(tmp, payload, { encoding: 'utf8', mode: 0o600 })
   try {
     await rename(tmp, filePath)
@@ -474,7 +516,7 @@ async function handleState(req, res, trustedHosts) {
   const filePath = await stateFilePath()
   if (req.method === 'GET' || req.method === 'HEAD') {
     const doc = await readDoc(filePath)
-    const data = { notes: doc.notes, version: doc.version, savedAt: Date.now() }
+    const data = { notes: doc.notes, version: doc.version, trashCount: doc.trash.length, savedAt: Date.now() }
     if (doc.recovered) {
       data.recovered = true
       data.backup = doc.backup || ''
@@ -498,7 +540,8 @@ async function handleState(req, res, trustedHosts) {
     const doc = await readDoc(filePath)
     if (baseVersion !== null && baseVersion !== doc.version) return { conflict: doc }
     const version = doc.version + 1
-    await writeDoc(filePath, { version, notes })
+    // 整份覆盖（导入）不动回收站。
+    await writeDoc(filePath, { version, notes, trash: doc.trash })
     return { version }
   })
   if (result.conflict) {
@@ -544,7 +587,9 @@ async function handleNote(req, res, rawId, url, trustedHosts) {
         notes = [note, ...doc.notes]
       }
       const version = doc.version + 1
-      await writeDoc(filePath, { version, notes })
+      // 同 id 的回收站条目一并清掉：撤销删除 / 重建会走这条路，避免回收站里留重复。
+      const trash = doc.trash.filter((item) => item.id !== id)
+      await writeDoc(filePath, { version, notes, trash })
       return { version }
     })
     if (result.conflict) {
@@ -570,21 +615,127 @@ async function handleNote(req, res, rawId, url, trustedHosts) {
     const result = await serialized(async () => {
       const doc = await readDoc(filePath)
       if (baseVersion !== null && baseVersion !== doc.version) return { conflict: doc }
+      const note = doc.notes.find((item) => item.id === id)
+      if (!note) return { version: doc.version, removed: false }
       const notes = doc.notes.filter((item) => item.id !== id)
-      if (notes.length === doc.notes.length) return { version: doc.version, removed: false }
+      const trash = [Object.assign({}, note, { deletedAt: Date.now() }), ...doc.trash].slice(0, MAX_TRASH)
       const version = doc.version + 1
-      await writeDoc(filePath, { version, notes })
-      return { version, removed: true }
+      await writeDoc(filePath, { version, notes, trash })
+      return { version, removed: true, trashCount: trash.length }
     })
     if (result.conflict) {
       conflict(res, result.conflict)
       return
     }
-    json(res, 200, { ok: true, data: { version: result.version, removed: result.removed } })
+    json(res, 200, {
+      ok: true,
+      data: { version: result.version, removed: result.removed, trashCount: result.trashCount || 0 },
+    })
     return
   }
 
   notAllowed(res, req.method)
+}
+
+/** 回收站列表 / 清空。 */
+async function handleTrash(req, res, trustedHosts) {
+  const filePath = await stateFilePath()
+  if (req.method === 'GET' || req.method === 'HEAD') {
+    const doc = await readDoc(filePath)
+    json(res, 200, { ok: true, data: { entries: doc.trash, version: doc.version } }, req.method === 'HEAD')
+    return
+  }
+  if (req.method === 'DELETE') {
+    const markerError = validateMutationMarker(req, trustedHosts)
+    if (markerError !== null) {
+      json(res, markerError.statusCode, { ok: false, code: markerError.code, error: markerError.error })
+      return
+    }
+    const result = await serialized(async () => {
+      const doc = await readDoc(filePath)
+      if (doc.trash.length === 0) return { version: doc.version, purged: 0 }
+      const version = doc.version + 1
+      await writeDoc(filePath, { version, notes: doc.notes, trash: [] })
+      return { version, purged: doc.trash.length }
+    })
+    json(res, 200, { ok: true, data: { version: result.version, purged: result.purged, trashCount: 0 } })
+    return
+  }
+  notAllowed(res, req.method)
+}
+
+/** 单条回收站操作：`POST …/trash/:id/restore` 还原，`DELETE …/trash/:id` 彻底删除。 */
+async function handleTrashItem(req, res, rawRest, trustedHosts) {
+  const segments = rawRest.split('/')
+  let id
+  try {
+    id = decodeURIComponent(segments[0] || '')
+  } catch {
+    json(res, 400, { ok: false, code: 'error.proto.invalidId', error: 'invalid note id' })
+    return
+  }
+  if (!ID_PATTERN.test(id)) {
+    json(res, 400, { ok: false, code: 'error.proto.invalidId', error: 'invalid note id' })
+    return
+  }
+  const filePath = await stateFilePath()
+  const restoring = segments[1] === 'restore'
+
+  if (restoring) {
+    if (req.method !== 'POST') {
+      notAllowed(res, req.method)
+      return
+    }
+    const requestError = validateMutationRequest(req, trustedHosts)
+    if (requestError !== null) {
+      json(res, requestError.statusCode, { ok: false, code: requestError.code, error: requestError.error })
+      return
+    }
+    await readBody(req)
+    const result = await serialized(async () => {
+      const doc = await readDoc(filePath)
+      const entry = doc.trash.find((item) => item.id === id)
+      if (!entry) return { version: doc.version, restored: false, trashCount: doc.trash.length }
+      if (doc.notes.length >= MAX_NOTES) return { tooMany: true }
+      const note = Object.assign({}, entry)
+      delete note.deletedAt
+      const trash = doc.trash.filter((item) => item.id !== id)
+      const version = doc.version + 1
+      await writeDoc(filePath, { version, notes: [note, ...doc.notes], trash })
+      return { version, restored: true, trashCount: trash.length }
+    })
+    if (result.tooMany) {
+      json(res, 400, { ok: false, code: 'error.proto.tooManyNotes', error: `at most ${MAX_NOTES} notes` })
+      return
+    }
+    json(res, 200, {
+      ok: true,
+      data: { version: result.version, restored: result.restored, trashCount: result.trashCount },
+    })
+    return
+  }
+
+  if (req.method !== 'DELETE') {
+    notAllowed(res, req.method)
+    return
+  }
+  const markerError = validateMutationMarker(req, trustedHosts)
+  if (markerError !== null) {
+    json(res, markerError.statusCode, { ok: false, code: markerError.code, error: markerError.error })
+    return
+  }
+  const result = await serialized(async () => {
+    const doc = await readDoc(filePath)
+    const trash = doc.trash.filter((item) => item.id !== id)
+    if (trash.length === doc.trash.length) return { version: doc.version, purged: 0, trashCount: trash.length }
+    const version = doc.version + 1
+    await writeDoc(filePath, { version, notes: doc.notes, trash })
+    return { version, purged: 1, trashCount: trash.length }
+  })
+  json(res, 200, {
+    ok: true,
+    data: { version: result.version, purged: result.purged, trashCount: result.trashCount },
+  })
 }
 
 async function handleAssetUpload(req, res, trustedHosts) {
@@ -733,6 +884,14 @@ function apply(ctx) {
             }
             if (pathname.startsWith(`${NOTES_PATH}/`)) {
               await handleNote(req, res, pathname.slice(NOTES_PATH.length + 1), url, trustedHosts)
+              return
+            }
+            if (pathname === TRASH_PATH) {
+              await handleTrash(req, res, trustedHosts)
+              return
+            }
+            if (pathname.startsWith(`${TRASH_PATH}/`)) {
+              await handleTrashItem(req, res, pathname.slice(TRASH_PATH.length + 1), trustedHosts)
               return
             }
             if (pathname === ASSETS_PATH) {
