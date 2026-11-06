@@ -114,6 +114,7 @@ const TOOLS = [
         title: { type: 'string', description: 'Short title (up to 200 characters).' },
         body: { type: 'string', description: 'Note body (up to 20000 characters).' },
         color: { type: 'string', enum: PAPER_IDS, description: 'Paper color; defaults to pink.' },
+        pinned: { type: 'boolean', description: 'Pin the note to the top of the board.' },
       },
       additionalProperties: false,
     },
@@ -133,6 +134,7 @@ const TOOLS = [
         body: { type: 'string', description: 'New body, or the text to append when mode is "append".' },
         color: { type: 'string', enum: PAPER_IDS, description: 'New paper color.' },
         mode: { type: 'string', enum: ['replace', 'append'], description: 'How body is applied (default replace).' },
+        pinned: { type: 'boolean', description: 'Pin (true) or unpin (false) the note.' },
       },
       required: ['id'],
       additionalProperties: false,
@@ -143,6 +145,7 @@ const TOOLS = [
       if (typeof args.title === 'string') patch.title = args.title
       if (typeof args.body === 'string') patch.body = args.body
       if (typeof args.color === 'string') patch.color = args.color
+      if (typeof args.pinned === 'boolean') patch.pinned = args.pinned
       if (args.mode === 'append') patch.mode = 'append'
       if (Object.keys(patch).length === 0) {
         const note = await getNote(id)
@@ -390,6 +393,12 @@ async function selfTest() {
 
     result = await call('notes_update', { id: created.id, title: '购物清单' })
     check('update title', result.content[0].text.includes('购物清单'), result)
+
+    result = await call('notes_update', { id: created.id, pinned: true })
+    check('pin toggles on', JSON.parse(result.content[0].text).pinned === true, result)
+
+    result = await call('notes_list', {})
+    check('list reports pinned', JSON.parse(result.content[0].text).items[0].pinned === true, result)
 
     result = await call('notes_list', { query: '面包' })
     check('search finds note', JSON.parse(result.content[0].text).matched === 1, result)

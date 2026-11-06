@@ -128,6 +128,8 @@ window.__ModuleLoader__.load({
         todoList: '待办清单',
         todoToggle: '切换完成状态',
         todoMore: '更多待办',
+        pin: '置顶',
+        unpin: '取消置顶',
       },
       en: {
         nav: 'Notes',
@@ -199,6 +201,8 @@ window.__ModuleLoader__.load({
         todoList: 'Tasks',
         todoToggle: 'Toggle done',
         todoMore: 'More tasks',
+        pin: 'Pin to top',
+        unpin: 'Unpin',
       },
     }
 
@@ -252,6 +256,8 @@ window.__ModuleLoader__.load({
 .dsn-note { position: relative; display: flex; flex: 0 0 auto; flex-direction: column; width: 300px; min-width: 220px; max-width: 720px; min-height: 240px; max-height: 720px; border-radius: 12px; background: var(--dsn-paper); color: var(--dsn-ink); box-shadow: var(--dsn-shadow); resize: both; overflow: hidden; transition: transform 140ms ease, box-shadow 140ms ease; }
 .dsn-note:hover { transform: translateY(-1px); }
 .dsn-note[data-focus="true"] { box-shadow: var(--dsn-shadow-lift); }
+/* 置顶的卡片常驻抬起阴影，方便一眼分辨「钉在最上面」的那几张。 */
+.dsn-note[data-pinned="true"] { box-shadow: var(--dsn-shadow-lift); }
 .dsn-note[data-dragging="true"] { opacity: 0.4; transform: scale(0.98); box-shadow: var(--dsn-shadow-lift); }
 /* 拖拽落点：贴在目标卡片左/右边缘的竖条，明确「插到这一侧」。 */
 .dsn-note[data-drop]::after { content: ''; position: absolute; z-index: 4; top: 6px; bottom: 6px; width: 3px; border-radius: 2px; background: var(--dsw-alias-brand-primary); }
@@ -266,6 +272,10 @@ window.__ModuleLoader__.load({
 .dsn-icon-btn:hover { background: var(--dsn-paper-line); opacity: 1; }
 .dsn-icon-btn:focus-visible { outline: 2px solid var(--dsn-ink); outline-offset: 1px; opacity: 1; }
 .dsn-icon-btn--close { font-size: 16px; }
+.dsn-icon-btn--pin { width: 20px; }
+.dsn-icon-btn--pin[data-pinned="true"] { opacity: 1; }
+.dsn-icon-btn--pin[data-pinned="false"] { opacity: 0.35; }
+.dsn-icon-btn--pin[data-pinned="false"]:hover { opacity: 1; }
 .dsn-note-body { flex: 1 1 auto; width: 100%; min-height: 150px; padding: 10px 14px; border: 0; background: transparent; color: inherit; font: inherit; line-height: 1.7; resize: none; outline: none; scrollbar-width: thin; }
 .dsn-note-body::-webkit-scrollbar { width: 6px; }
 .dsn-note-body::-webkit-scrollbar-thumb { border-radius: 3px; background: var(--dsn-paper-line); }
@@ -383,6 +393,11 @@ window.__ModuleLoader__.load({
       return -Number((note && note.createdAt) || 0)
     }
 
+    /** 置顶的便签永远排在最前面，与当前选的是哪种排序无关。 */
+    function pinRank(note) {
+      return note && note.pinned === true ? 0 : 1
+    }
+
     /** 老数据没有 color 字段时按 id 稳定散列取色，避免每次渲染换色。 */
     function paperOf(note) {
       if (note && PAPER_IDS.has(note.color)) return note.color
@@ -461,6 +476,29 @@ window.__ModuleLoader__.load({
           d: 'M6 2.25v7.5M2.25 6h7.5',
           stroke: 'currentColor',
           strokeWidth: 1.5,
+          strokeLinecap: 'round',
+        }),
+      )
+    }
+
+    /** 置顶图钉：实心=已置顶，空心=未置顶；跟随当前文字色。 */
+    function GlyphPin(props) {
+      const filled = Boolean(props && props.filled)
+      return h(
+        'svg',
+        { width: 13, height: 13, viewBox: '0 0 14 14', 'aria-hidden': 'true', style: { display: 'block' } },
+        h('circle', {
+          cx: 8.8,
+          cy: 5.2,
+          r: 3.1,
+          fill: filled ? 'currentColor' : 'none',
+          stroke: 'currentColor',
+          strokeWidth: 1.4,
+        }),
+        h('path', {
+          d: 'M6.6 7.4 2.2 11.8',
+          stroke: 'currentColor',
+          strokeWidth: 1.4,
           strokeLinecap: 'round',
         }),
       )
@@ -600,6 +638,7 @@ window.__ModuleLoader__.load({
           className: `dsn-note dsn-paper-${props.color}`,
           'data-focus': props.focused ? 'true' : 'false',
           'data-dragging': props.dragging ? 'true' : 'false',
+          'data-pinned': note.pinned === true ? 'true' : 'false',
           'data-drop': props.dropEdge || null,
           style,
           onPointerDown: (event) => {
@@ -658,6 +697,19 @@ window.__ModuleLoader__.load({
             spellCheck: false,
             onChange: (event) => props.onChange(note.id, { title: event.target.value }),
           }),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dsn-icon-btn dsn-icon-btn--pin',
+              'data-pinned': note.pinned === true ? 'true' : 'false',
+              'aria-pressed': note.pinned === true ? 'true' : 'false',
+              title: note.pinned === true ? t('unpin') : t('pin'),
+              'aria-label': note.pinned === true ? t('unpin') : t('pin'),
+              onClick: () => props.onChange(note.id, { pinned: note.pinned !== true }),
+            },
+            h(GlyphPin, { filled: note.pinned === true }),
+          ),
           h(
             'button',
             {
@@ -1597,7 +1649,11 @@ window.__ModuleLoader__.load({
             : previous
               ? orderOf(previous) + 1000
               : 0
+        // 拖到另一组（置顶 / 普通）就跟着换组，否则松手后会被置顶权重弹回原位。
+        const anchor = next || previous
+        const pinned = Boolean(anchor && anchor.pinned === true)
         const updated = Object.assign({}, moved, { order })
+        if ((moved.pinned === true) !== pinned) updated.pinned = pinned
         const reordered = rest.slice()
         reordered.splice(insertAt, 0, updated)
         captureLayout()
@@ -1664,10 +1720,11 @@ window.__ModuleLoader__.load({
           )
         }
         const sorted = list.slice()
-        if (sort === 'updated') sorted.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
-        else if (sort === 'title') sorted.sort((a, b) => titleKey(a).localeCompare(titleKey(b)))
-        else if (sort === 'created') sorted.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
-        else sorted.sort((a, b) => orderOf(a) - orderOf(b))
+        const pinnedFirst = (a, b) => pinRank(a) - pinRank(b)
+        if (sort === 'updated') sorted.sort((a, b) => pinnedFirst(a, b) || (b.updatedAt || 0) - (a.updatedAt || 0))
+        else if (sort === 'title') sorted.sort((a, b) => pinnedFirst(a, b) || titleKey(a).localeCompare(titleKey(b)))
+        else if (sort === 'created') sorted.sort((a, b) => pinnedFirst(a, b) || (b.createdAt || 0) - (a.createdAt || 0))
+        else sorted.sort((a, b) => pinnedFirst(a, b) || orderOf(a) - orderOf(b))
         return sorted
       }, [notes, query, sort])
 

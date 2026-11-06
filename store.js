@@ -183,10 +183,11 @@ function sanitizeNote(raw, fallbackId) {
   const id = typeof rawId === 'string' && rawId !== '' ? rawId.slice(0, MAX_ID) : randomUUID()
   const color = typeof raw.color === 'string' && PAPER_COLORS.has(raw.color) ? raw.color : ''
   const note = { id, title, body, color, createdAt, updatedAt }
-  // 卡片尺寸与手动排序位置都是可选的：老数据没有就当没设置。
+  // 卡片尺寸、手动排序位置与置顶标记都是可选的：老数据没有就当没设置。
   if (Number.isFinite(raw.width)) note.width = clampSize(raw.width, MIN_CARD_WIDTH, MAX_CARD_WIDTH)
   if (Number.isFinite(raw.height)) note.height = clampSize(raw.height, MIN_CARD_HEIGHT, MAX_CARD_HEIGHT)
   if (Number.isFinite(raw.order)) note.order = raw.order
+  if (raw.pinned === true) note.pinned = true
   return note
 }
 
@@ -402,6 +403,7 @@ async function listNotes(options = {}) {
       title: note.title,
       preview: note.body.replace(/\s+/g, ' ').trim().slice(0, 120),
       color: colorOf(note),
+      pinned: note.pinned === true,
       createdAt: note.createdAt,
       updatedAt: note.updatedAt,
     }
@@ -423,6 +425,7 @@ async function createNote(input = {}) {
     title: typeof input.title === 'string' ? input.title : '',
     body: typeof input.body === 'string' ? input.body : '',
     color: PAPER_COLORS.has(input.color) ? input.color : PAPER_IDS[0],
+    pinned: input.pinned === true,
     createdAt: now,
     updatedAt: now,
   })
@@ -456,6 +459,7 @@ async function updateNote(id, patch = {}) {
         width: current.width,
         height: current.height,
         order: current.order,
+        pinned: typeof patch.pinned === 'boolean' ? patch.pinned : current.pinned === true,
       },
       current.id,
     )

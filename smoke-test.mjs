@@ -361,6 +361,22 @@ const toolNote = JSON.parse(await tool('notes_create').execute({ title: '工具�
 check('native create returns an id', typeof toolNote.id === 'string', toolNote)
 const toolList = JSON.parse(await tool('notes_list').execute({ query: '工具创建' }))
 check('native list finds the note', toolList.matched === 1, toolList)
+
+const toolPinned = JSON.parse(await tool('notes_update').execute({ id: toolNote.id, pinned: true }))
+check('native pin update', toolPinned.pinned === true, toolPinned)
+const pinnedList = JSON.parse(await tool('notes_list').execute({}))
+check(
+  'native list reports pinned',
+  pinnedList.items.some((item) => item.id === toolNote.id && item.pinned === true),
+  pinnedList.items,
+)
+r = await call({ method: 'GET' })
+check(
+  'pinned flag survives the serializer',
+  r.json?.data?.notes?.some((note) => note.id === toolNote.id && note.pinned === true),
+  r.json?.data?.notes,
+)
+
 const toolDeleted = JSON.parse(await tool('notes_delete').execute({ id: toolNote.id }))
 check('native delete moves to trash', toolDeleted.deleted === true && toolDeleted.trashCount >= 1, toolDeleted)
 check('native output renders text content', tool('notes_list').output.render({}, '{}')[0].type === 'text', null)

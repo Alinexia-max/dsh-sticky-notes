@@ -668,6 +668,7 @@ function notesTools() {
           title: { type: 'string', description: 'Short title (up to 200 characters).' },
           body: { type: 'string', description: 'Note body (up to 20000 characters).' },
           color: { type: 'string', enum: PAPER_IDS, description: 'Paper color; defaults to pink.' },
+          pinned: { type: 'boolean', description: 'Pin the note to the top of the board.' },
         },
         additionalProperties: false,
       },
@@ -688,6 +689,7 @@ function notesTools() {
           body: { type: 'string', description: 'New body, or the text to append when mode is "append".' },
           color: { type: 'string', enum: PAPER_IDS, description: 'New paper color.' },
           mode: { type: 'string', enum: ['replace', 'append'], description: 'How body is applied (default replace).' },
+          pinned: { type: 'boolean', description: 'Pin (true) or unpin (false) the note.' },
         },
         required: ['id'],
         additionalProperties: false,
@@ -699,6 +701,7 @@ function notesTools() {
         if (typeof args.title === 'string') patch.title = args.title
         if (typeof args.body === 'string') patch.body = args.body
         if (typeof args.color === 'string') patch.color = args.color
+        if (typeof args.pinned === 'boolean') patch.pinned = args.pinned
         if (args.mode === 'append') patch.mode = 'append'
         if (Object.keys(patch).length === 0) {
           const note = await getNote(id)

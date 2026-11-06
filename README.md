@@ -55,7 +55,8 @@ dsh-sticky-notes/
   `x-dsh-sticky-notes: 1`（JSON 接口还要 `application/json`），本路由不返回任何 CORS 头；note id 与
   asset 名都先过正则再拼路径。
 - 服务端会收窄提交内容：最多 200 条、标题 200 字、正文 20000 字、`color` 只认
-  `pink / yellow / mint / sky / violet`，可选的 `width` / `height` 夹到 220–720 / 180–720，字段类型不对就归零。
+  `pink / yellow / mint / sky / violet`，可选的 `width` / `height` 夹到 220–720 / 180–720、`pinned` 只认 `true`，
+  字段类型不对就归零。
 - 整份覆盖的请求体上限 16MB（200 条 × 20000 字中文约 12MB），必须能装下内容上限，否则大内容会 413。
 - `notes.json` 解析失败时先改名为 `notes.corrupt-<时间>.json` 留档，再按空数据返回（响应带
   `recovered: true` 与 `backup`），避免插件永久卡在「加载失败」。
@@ -88,10 +89,10 @@ Cursor / Claude Desktop 等客户端的 `mcpServers` 条目同理。
 
 | 工具 | 作用 |
 |---|---|
-| `notes_list` | 列出/搜索（`query`、`limit`、`includeBody`），拿 id |
+| `notes_list` | 列出/搜索（`query`、`limit`、`includeBody`），拿 id；返回 `pinned` |
 | `notes_get` | 读单条全文 |
-| `notes_create` | 新建（`title`、`body`、`color`） |
-| `notes_update` | 改标题/正文/配色，`mode: append` 追加正文 |
+| `notes_create` | 新建（`title`、`body`、`color`、`pinned`） |
+| `notes_update` | 改标题/正文/配色/置顶，`mode: append` 追加正文 |
 | `notes_delete` | 软删除，进回收站 |
 | `notes_trash_list` | 列回收站 |
 | `notes_restore` | 还原 |
@@ -111,14 +112,16 @@ Cursor / Claude Desktop 等客户端的 `mcpServers` 条目同理。
 ## 界面
 
 贴纸墙风格：每条便签就是一张彩色圆角小窗（配色见 client.js 的 `PAPERS` 与 CSS 的 `dsn:palette` 区块），
-顶部标题栏左边是可直接改的标题（留空时用正文首行当标题），右边是 `···`（换纸色 / 删除）和 `×`（直接删除，
-底部弹出撤销条）。整块纸面就是正文，右下角可拖拽改大小，尺寸随数据保存。暗色主题下自动换成压暗纸色 + 浅色墨字。
+顶部标题栏左边是可直接改的标题（留空时用正文首行当标题），右边是图钉（置顶）、`···`（换纸色 / 删除）和 `×`
+（直接删除，底部弹出撤销条）。整块纸面就是正文，右下角可拖拽改大小，尺寸随数据保存。暗色主题下自动换成压暗纸色 + 浅色墨字。
 
 ## 功能
 
 - 新建 / 编辑（标题 + 正文）/ 删除 + 撤销 / 换纸色 / 拖拽改尺寸 / 拖拽排序
   （拖动时整张卡片作为拖影跟随指针，原位置卡片变淡；按指针在目标卡片左/右半决定插前还是插后，
   落点有竖条提示，重排走 FLIP 位移动画；搜索状态下禁用拖拽）
+- 置顶：卡片头部的图钉按钮一键置顶/取消，置顶的便签在所有排序方式下都排在最前，并带常驻抬起阴影；
+  拖到置顶区或普通区会自动跟着换组
 - 正文里的 `- [ ]` / `- [x]` 待办在卡片内渲染成复选框，点一下就写回正文；脚部显示完成度，超过 6 行折成 `+N`
 - 回收站：删除先进回收站（最多 30 条 / 30 天），可还原、彻底删除、清空（清空要点两次）
 - 存放目录可在界面切换，自动迁移便签与图片，可一键恢复默认
@@ -135,10 +138,10 @@ Cursor / Claude Desktop 等客户端的 `mcpServers` 条目同理。
 
 ```powershell
 cd E:\github\dsh-sticky-notes
-node check-client.mjs          # 36/36：loader 契约、i18n、主题 token、配色白名单、路由/工具面一致性、零依赖
-node smoke-test.mjs            # 56/56：HTTP 路由、409 冲突、鉴权、路径穿越、图片、坏文件恢复、目录迁移、原生工具
+node check-client.mjs          # 37/37：loader 契约、i18n、主题 token、配色白名单、路由/工具面一致性、零依赖
+node smoke-test.mjs            # 59/59：HTTP 路由、409 冲突、鉴权、路径穿越、图片、坏文件恢复、目录迁移、原生工具
 node mcp-test.mjs              # 22/22：真拉两个子进程走 stdio JSON-RPC（握手 / tools / 错误码 / 跨进程写锁）
-node mcp.js --self-test        # 15/15：MCP 工具面在临时目录里的增删改查与确认门槛
+node mcp.js --self-test        # 17/17：MCP 工具面在临时目录里的增删改查、置顶与确认门槛
 ```
 
 `npm test` 会把上面四步串起来跑。

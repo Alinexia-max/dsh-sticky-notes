@@ -145,6 +145,11 @@ check(
   'missing background sync',
 )
 check('client poll interval is bounded', /SYNC_INTERVAL = \d{4,6}/.test(client), 'missing SYNC_INTERVAL')
+check(
+  'client can pin notes above the rest',
+  client.includes('function pinRank') && client.includes("'data-pinned'") && client.includes('GlyphPin'),
+  'missing pinned UI',
+)
 
 const failed = checks.filter((item) => !item.ok)
 console.log(`\n${checks.length - failed.length}/${checks.length} passed`)
