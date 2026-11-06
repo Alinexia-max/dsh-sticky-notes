@@ -262,7 +262,8 @@ window.__ModuleLoader__.load({
 .dsn-note[data-drop="before"]::after { left: 3px; }
 .dsn-note[data-drop="after"]::after { right: 3px; }
 .dsn-note-head { display: flex; flex: 0 0 auto; align-items: center; gap: 2px; min-height: 36px; padding: 0 6px 0 4px; background: var(--dsn-paper-head); border-bottom: 1px solid var(--dsn-paper-line); border-radius: 12px 12px 0 0; }
-.dsn-drag { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; width: 16px; height: 22px; color: inherit; font-size: 11px; opacity: 0.35; cursor: grab; user-select: none; }
+.dsn-drag { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; width: 20px; height: 24px; margin-left: -2px; color: inherit; font-size: 13px; opacity: 0.35; cursor: grab; user-select: none; }
+.dsn-drag:active { cursor: grabbing; }
 .dsn-drag:hover { opacity: 1; }
 .dsn-note-title { flex: 1 1 auto; min-width: 0; padding: 9px 0; border: 0; background: transparent; color: inherit; font: inherit; font-size: 13px; font-weight: 600; text-overflow: ellipsis; outline: none; }
 .dsn-note-title::placeholder, .dsn-note-body::placeholder { color: var(--dsn-ink); opacity: 0.42; }
@@ -613,6 +614,30 @@ window.__ModuleLoader__.load({
       flush()
       return blocks
     }
+
+    /**
+     * 拖拽落点的 order：只在同一个组（置顶 / 普通）内取前后邻居。
+     * 跨组时拿置顶卡的 order 当锚点会算出落在普通区之外的中值，松手就被排回原位。
+     */
+    function orderForDrop(list, insertAt, pinned, orderOfNote) {
+      const sameGroup = (note) => Boolean(note) && (note.pinned === true) === pinned
+      let prev = null
+      for (let index = insertAt - 1; index >= 0; index -= 1) {
+        if (!sameGroup(list[index])) continue
+        prev = list[index]
+        break
+      }
+      let next = null
+      for (let index = insertAt; index < list.length; index += 1) {
+        if (!sameGroup(list[index])) continue
+        next = list[index]
+        break
+      }
+      if (prev && next) return (orderOfNote(prev) + orderOfNote(next)) / 2
+      if (next) return orderOfNote(next) - 1000
+      if (prev) return orderOfNote(prev) + 1000
+      return 0
+    }
     /* dsn:body:end */
 
     /** 正文里引用的截图（相对路径，由 Host 端 assets 路由提供）。 */
@@ -742,6 +767,8 @@ window.__ModuleLoader__.load({
       const cancelRef = useRef(false)
       /** 只有按在右下角缩放柄上的拖拽才算「用户改尺寸」。 */
       const resizingRef = useRef(false)
+      /** 预览区按下的位置，用来区分「点击」和「拖动」。 */
+      const pressRef = useRef(null)
 
       const style = {}
       if (Number.isFinite(note.width)) style.width = `${note.width}px`
@@ -936,8 +963,16 @@ window.__ModuleLoader__.load({
 
       /** 点预览空白处进编辑；表格和待办自己吃掉点击，不会整块跳去编辑态。 */
       const onPreviewClick = (event) => {
+        // 按下后拖动超过 4px 算拖拽，不算点击 —— 免得想挪卡片反而进了编辑态。
+        const press = pressRef.current
+        pressRef.current = null
+        if (press && (Math.abs(event.clientX - press.x) > 4 || Math.abs(event.clientY - press.y) > 4)) return
         const node = event.target && typeof event.target.closest === 'function' ? event.target.closest('[data-offset]') : null
         enterEdit(node ? Number(node.getAttribute('data-offset')) || 0 : 0)
+      }
+
+      const onPreviewPointerDown = (event) => {
+        pressRef.current = { x: event.clientX, y: event.clientY }
       }
 
       // 点卡片外面就收起真身，回到「表格就是表格」的样子。
@@ -1036,6 +1071,7 @@ window.__ModuleLoader__.load({
             props.onCardRef(note.id, element)
           },
           className: `dsn-note dsn-paper-${props.color}`,
+          'data-note-id': note.id,
           'data-focus': props.focused ? 'true' : 'false',
           'data-dragging': props.dragging ? 'true' : 'false',
           'data-pinned': note.pinned === true ? 'true' : 'false',
@@ -1057,7 +1093,9 @@ window.__ModuleLoader__.load({
           },
           onDrop: (event) => {
             event.preventDefault()
-            props.onDrop(note.id)
+            // 来源 id 优先从 dataTransfer 读：拖拽期间卡片会重渲染，ref 里的 id 可能已经清掉。
+            const source = event.dataTransfer ? event.dataTransfer.getData('text/plain') : ''
+            props.onDrop(note.id, source)
           },
         },
         h(
@@ -1151,7 +1189,12 @@ window.__ModuleLoader__.load({
             })
           : h(
               'div',
-              { className: 'dsn-preview', 'aria-label': t('bodyPlaceholder'), onClick: onPreviewClick },
+              {
+                className: 'dsn-preview',
+                'aria-label': t('bodyPlaceholder'),
+                onClick: onPreviewClick,
+                onPointerDown: onPreviewPointerDown,
+              },
               previewNodes,
             ),
         images.length > 0 || links.length > 0
@@ -2023,8 +2066,9 @@ window.__ModuleLoader__.load({
        * 放下时按「指针在目标卡片左半还是右半」决定插前还是插后，
        * 只改被拖动那一条的 order（取前后邻居的中点），不发整份文档。
        */
-      const onDrop = useCallback((targetId) => {
-        const dragged = dragIdRef.current
+      const onDrop = useCallback((targetId, sourceId) => {
+        // dataTransfer 里的来源 id 比 ref 可靠：拖拽期间卡片会重渲染，ref 可能已经被 dragend 清掉。
+        const dragged = typeof sourceId === 'string' && sourceId !== '' ? sourceId : dragIdRef.current
         const edge = dragEdgeRef.current === 'after' ? 'after' : 'before'
         onDragEnd()
         if (!dragged || dragged === targetId) return
@@ -2036,18 +2080,10 @@ window.__ModuleLoader__.load({
         const targetIndex = rest.findIndex((note) => note.id === targetId)
         if (targetIndex < 0) return
         const insertAt = edge === 'after' ? targetIndex + 1 : targetIndex
-        const previous = rest[insertAt - 1]
-        const next = rest[insertAt]
-        const order = previous && next
-          ? (orderOf(previous) + orderOf(next)) / 2
-          : next
-            ? orderOf(next) - 1000
-            : previous
-              ? orderOf(previous) + 1000
-              : 0
         // 拖到另一组（置顶 / 普通）就跟着换组，否则松手后会被置顶权重弹回原位。
-        const anchor = next || previous
+        const anchor = rest[insertAt] || rest[insertAt - 1]
         const pinned = Boolean(anchor && anchor.pinned === true)
+        const order = orderForDrop(rest, insertAt, pinned, orderOf)
         const updated = Object.assign({}, moved, { order })
         if ((moved.pinned === true) !== pinned) updated.pinned = pinned
         const reordered = rest.slice()
@@ -2281,7 +2317,30 @@ window.__ModuleLoader__.load({
             : null,
           h(
             'div',
-            { className: showBoard ? 'dsn-board' : 'dsn-board dsn-board--empty', ref: boardRef },
+            {
+              className: showBoard ? 'dsn-board' : 'dsn-board dsn-board--empty',
+              ref: boardRef,
+              // 兜底：卡片上的 dragover/drop 万一没接住，就在看板层按卡片 id 再算一次。
+              onDragOver: (event) => {
+                if (!dragIdRef.current) return
+                const card = event.target && event.target.closest ? event.target.closest('[data-note-id]') : null
+                if (!card) return
+                event.preventDefault()
+                const id = card.getAttribute('data-note-id')
+                if (!id || id === dragIdRef.current) return
+                const rect = card.getBoundingClientRect()
+                onDragOverCard(id, event.clientX > rect.left + rect.width / 2 ? 'after' : 'before')
+              },
+              onDrop: (event) => {
+                // 卡片已经处理过就不再重复排序。
+                if (event.defaultPrevented) return
+                const card = event.target && event.target.closest ? event.target.closest('[data-note-id]') : null
+                if (!card) return
+                event.preventDefault()
+                const source = event.dataTransfer ? event.dataTransfer.getData('text/plain') : ''
+                onDrop(card.getAttribute('data-note-id'), source)
+              },
+            },
             board,
           ),
           undoEntry

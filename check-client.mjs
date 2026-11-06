@@ -156,7 +156,7 @@ const bodyBegin = client.indexOf('/* dsn:body:begin')
 const bodyEnd = client.indexOf('/* dsn:body:end */')
 const bodyBlock = bodyBegin >= 0 && bodyEnd > bodyBegin ? client.slice(client.indexOf('\n', bodyBegin), bodyEnd) : ''
 const tables = bodyBlock
-  ? new Function(bodyBlock + '\nreturn { tablesOf, setTableCell, tableFromTsv, appendTable, blocksOf };')()
+  ? new Function(bodyBlock + '\nreturn { tablesOf, setTableCell, tableFromTsv, appendTable, blocksOf, orderForDrop };')()
   : null
 check('body helpers are evaluable', Boolean(tables), 'missing dsn:body block')
 if (tables) {
@@ -244,6 +244,21 @@ check(
   client.includes('onPreviewClick') && client.includes('enterEdit'),
   'missing preview-to-edit entry',
 )
+
+// 17. 拖拽落点：order 只在同组内取邻居，置顶/普通混排时才不会落回原位
+if (tables) {
+  const valueOf = (note) => note.order
+  const mixed = [
+    { id: 'p', pinned: true, order: -1 },
+    { id: 'c', order: -300 },
+    { id: 'b', order: -200 },
+  ]
+  const atTop = tables.orderForDrop(mixed, 1, false, valueOf)
+  check('drop below a pinned card lands in the plain group', atTop < -300, atTop)
+  check('drop between two plain cards takes the midpoint', tables.orderForDrop(mixed, 2, false, valueOf) === -250, tables.orderForDrop(mixed, 2, false, valueOf))
+  check('drop into the pinned group lands before it', tables.orderForDrop(mixed, 0, true, valueOf) < -1, tables.orderForDrop(mixed, 0, true, valueOf))
+  check('drop at the pinned group tail lands after it', tables.orderForDrop(mixed, 1, true, valueOf) > -1, tables.orderForDrop(mixed, 1, true, valueOf))
+}
 
 const failed = checks.filter((item) => !item.ok)
 console.log(`\n${checks.length - failed.length}/${checks.length} passed`)
