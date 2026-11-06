@@ -33,6 +33,8 @@ window.__ModuleLoader__.load({
     const RETRY_DELAYS = [1000, 2000, 4000, 8000, 15000]
     /** 删除后撤销窗口。 */
     const UNDO_MS = 6000
+    /** 面板可见时对齐后台改动的轮询间隔（MCP server / 另一个窗口）。 */
+    const SYNC_INTERVAL = 20000
     /** 卡片上最多直出几条待办，剩下的折成 +N。 */
     const MAX_TODO_ROWS = 6
     /** 同一个冲突连续出现这么多次就放弃自动合并，转为报错。 */
@@ -1084,6 +1086,40 @@ window.__ModuleLoader__.load({
         }
       }, [commit])
 
+      /**
+       * 后台对齐：MCP server 或另一个窗口可能在背后改过数据。
+       * 只在「本端没有待保存改动」时按版本号整体接管，避免把用户正在写的内容冲掉；
+       * 有改动就交给保存流程，遇到 409 时现有的合并逻辑会兜住。
+       */
+      const syncIfStale = useCallback(async () => {
+        if (!aliveRef.current || savingRef.current) return
+        if (pendingRef.current.size > 0) return
+        try {
+          const response = await fetch(resolveApiUrl(API_PATH), {
+            headers: { accept: 'application/json' },
+            cache: 'no-store',
+          })
+          const payload = await response.json().catch(() => null)
+          if (!response.ok || !payload || payload.ok !== true) return
+          const data = payload.data || {}
+          if (!Number.isFinite(data.version) || data.version === versionRef.current) return
+          // 期间用户又改了东西，就让下一轮再看。
+          if (pendingRef.current.size > 0 || savingRef.current) return
+          const list = Array.isArray(data.notes) ? data.notes : []
+          versionRef.current = data.version
+          if (Number.isFinite(data.trashCount)) setTrashCount(data.trashCount)
+          captureLayout()
+          commit(list)
+          if (activeIdRef.current && !list.some((note) => note.id === activeIdRef.current)) {
+            const nextActive = list.length > 0 ? list[0].id : null
+            activeIdRef.current = nextActive
+            setActiveId(nextActive)
+          }
+        } catch {
+          // 面板可能离线，下次聚焦再试。
+        }
+      }, [captureLayout, commit])
+
       /** 打开存放目录弹窗时读一次当前路径。 */
       const openStorage = useCallback(async () => {
         setStorageOpen(true)
@@ -1316,6 +1352,22 @@ window.__ModuleLoader__.load({
         document.addEventListener('keydown', onKeyDown)
         return () => document.removeEventListener('keydown', onKeyDown)
       }, [storageOpen, trashOpen])
+
+      // 面板重新可见或窗口聚焦时对齐一次版本号，可见期间再低频兜底轮询。
+      useEffect(() => {
+        const tick = () => {
+          if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+          void syncIfStale()
+        }
+        document.addEventListener('visibilitychange', tick)
+        window.addEventListener('focus', tick)
+        const timer = window.setInterval(tick, SYNC_INTERVAL)
+        return () => {
+          document.removeEventListener('visibilitychange', tick)
+          window.removeEventListener('focus', tick)
+          window.clearInterval(timer)
+        }
+      }, [syncIfStale])
 
       // 新建后把光标送进标题；用 ref 注册表拿控件，卡片本身保持 memo 不重渲染。
       useEffect(() => {

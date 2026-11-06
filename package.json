@@ -1,8 +1,8 @@
 {
   "name": "@local/dsh-sticky-notes",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Sticky notes inside DeepSeek Harness — a left-sidebar entry with a simple note editor. · DSH 侧栏便签",
+  "description": "Sticky notes inside DeepSeek Harness — a left-sidebar entry with a simple note editor, plus an MCP server. · DSH 侧栏便签（含 MCP）",
   "type": "module",
   "main": "./index.js",
   "icon": "./icon.svg",
@@ -10,13 +10,19 @@
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
+    "./mcp": "./mcp.js",
     "./package.json": "./package.json",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
   },
+  "scripts": {
+    "test": "node check-client.mjs && node smoke-test.mjs && node mcp-test.mjs && node mcp.js --self-test"
+  },
   "files": [
     "index.js",
     "client.js",
+    "store.js",
+    "mcp.js",
     "cordis.patch.yml",
     "locale",
     "icon.svg",

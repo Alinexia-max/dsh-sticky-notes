@@ -1,7 +1,38 @@
 import { randomUUID } from 'node:crypto'
-import { copyFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
-import { homedir } from 'node:os'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+
+import {
+  ASSET_PATTERN,
+  ID_PATTERN,
+  MAX_NOTES,
+  MAX_TRASH,
+  PAPER_IDS,
+  assetsDir,
+  coded,
+  createNote,
+  defaultDataDir,
+  deleteNote,
+  emptyTrash,
+  getNote,
+  listNotes,
+  listTrash,
+  messageOf,
+  migrateData,
+  normalizeDir,
+  purgeNote,
+  readConfigDir,
+  readDoc,
+  resolveDataDir,
+  restoreNote,
+  sanitizeNote,
+  sanitizeNotes,
+  serialized,
+  stateFilePath,
+  updateNote,
+  writeConfigDir,
+  writeDoc,
+} from './store.js'
 
 /** Cordis 插件的诊断名；与 patch 里的 id 保持一致便于排查。 */
 const name = 'dsh-sticky-notes'
@@ -16,15 +47,6 @@ const TRASH_PATH = `${API_PREFIX}/trash`
 const ASSETS_PATH = `${API_PREFIX}/assets`
 /** 写请求必须带的自定义头：跨站 fetch 因此被迫走预检，而本路由不回 CORS。 */
 const CLIENT_MARKER_HEADER = 'x-dsh-sticky-notes'
-const MAX_NOTES = 200
-const MAX_TITLE = 200
-const MAX_NOTE_BODY = 20000
-const MAX_ID = 128
-/** 回收站：最多留 30 条、30 天。 */
-const MAX_TRASH = 30
-const TRASH_TTL_MS = 30 * 24 * 60 * 60 * 1000
-/** 写前快照份数：每次写盘前把上一份轮转成 notes.bak.1..N。 */
-const SNAPSHOT_COUNT = 3
 /**
  * 整份覆盖（导入/兼容）的请求体上限必须能装下最坏情况：200 条 × 20000 字，
  * 中文按 UTF-8 3 字节、加上转义与字段名约 12MB，取 16MB 留余量。
@@ -32,16 +54,6 @@ const SNAPSHOT_COUNT = 3
  */
 const MAX_BODY_BYTES = 16 * 1024 * 1024
 const MAX_ASSET_BYTES = 8 * 1024 * 1024
-/** 卡片手动调整后的尺寸（像素），只接受这个区间内的整数。 */
-const MIN_CARD_WIDTH = 220
-const MAX_CARD_WIDTH = 720
-const MIN_CARD_HEIGHT = 180
-const MAX_CARD_HEIGHT = 720
-/** 便签纸配色白名单，与 client.js 的 PAPERS、CSS 的 dsn-palette 三处一致。 */
-const PAPER_COLORS = new Set(['pink', 'yellow', 'mint', 'sky', 'violet'])
-/** 便签 id 同时出现在 URL 路径里，先卡死字符集再拼路径。 */
-const ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/
-const ASSET_PATTERN = /^[a-z0-9]{6,64}\.(png|jpg|gif|webp)$/
 const ASSET_TYPES = {
   png: 'image/png',
   jpg: 'image/jpeg',
@@ -53,23 +65,6 @@ const ASSET_EXTENSIONS = {
   'image/jpeg': 'jpg',
   'image/gif': 'gif',
   'image/webp': 'webp',
-}
-
-function coded(statusCode, code, message) {
-  const error = new Error(message)
-  error.statusCode = statusCode
-  error.code = code
-  return error
-}
-
-function messageOf(caught) {
-  if (caught instanceof Error) return caught.message
-  if (typeof caught === 'string') return caught
-  try {
-    return JSON.stringify(caught)
-  } catch {
-    return String(caught)
-  }
 }
 
 function json(res, code, payload, headOnly = false) {
@@ -258,250 +253,6 @@ function trustedHostsOf(ctx) {
     // 宿主结构随版本变化，失败时降级到 loopback。
   }
   return []
-}
-
-function resolveDshHome() {
-  const fromEnv = process.env.DSH_HOME
-  if (typeof fromEnv === 'string' && fromEnv.trim() !== '') return fromEnv.trim()
-  return join(homedir(), '.dsh')
-}
-
-/** 默认数据目录：`<DSH_HOME>/sticky-notes`。 */
-function defaultDataDir() {
-  return join(resolveDshHome(), 'sticky-notes')
-}
-
-/**
- * 存放目录的配置固定留在 DSH_HOME 下，跟着数据目录跑就没法「搬走」了。
- * 文件内容形如 `{ "dir": "D:\\Notes\\Sticky" }`，`dir: null` 表示用默认目录。
- */
-function configFilePath() {
-  return join(defaultDataDir(), 'config.json')
-}
-
-/** 只接受绝对路径；相对路径会跟着进程工作目录漂，不能存。 */
-function normalizeDir(input) {
-  if (typeof input !== 'string') return null
-  const value = input.trim().replace(/^"(.*)"$/, '$1')
-  if (value === '') return null
-  if (!isAbsolute(value)) return null
-  return resolve(value)
-}
-
-async function readConfigDir() {
-  try {
-    const parsed = JSON.parse(await readFile(configFilePath(), 'utf8'))
-    return normalizeDir(parsed && parsed.dir)
-  } catch {
-    return null
-  }
-}
-
-async function writeConfigDir(dir) {
-  const file = configFilePath()
-  await mkdir(dirname(file), { recursive: true })
-  await writeFile(file, `${JSON.stringify({ dir: dir || null }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
-}
-
-/** 运行期的数据目录缓存：每次保存都读一次配置文件太浪费。 */
-let dataDirCache = null
-
-async function resolveDataDir() {
-  if (dataDirCache !== null) return dataDirCache
-  dataDirCache = (await readConfigDir()) || defaultDataDir()
-  return dataDirCache
-}
-
-function forgetDataDir() {
-  dataDirCache = null
-}
-
-async function stateFilePath() {
-  return join(await resolveDataDir(), 'notes.json')
-}
-
-async function assetsDir() {
-  return join(await resolveDataDir(), 'assets')
-}
-
-async function pathExists(target) {
-  try {
-    await stat(target)
-    return true
-  } catch {
-    return false
-  }
-}
-
-/**
- * 切换目录时把老数据带过去：复制 notes.json 与 assets/，目标已有 notes.json 就不覆盖。
- * 复制完成后把老 notes.json 改名留档，避免切回去时读到一份过期数据。
- */
-async function migrateData(fromDir, toDir) {
-  const stats = { notes: 0, assets: 0, skipped: false }
-  if (resolve(fromDir) === resolve(toDir)) {
-    stats.skipped = true
-    return stats
-  }
-  const fromNotes = join(fromDir, 'notes.json')
-  const toNotes = join(toDir, 'notes.json')
-  if (!(await pathExists(fromNotes))) return stats
-  if (await pathExists(toNotes)) {
-    stats.skipped = true
-    return stats
-  }
-  await mkdir(toDir, { recursive: true })
-  await copyFile(fromNotes, toNotes)
-  try {
-    const parsed = JSON.parse(await readFile(toNotes, 'utf8'))
-    stats.notes = Array.isArray(parsed && parsed.notes) ? parsed.notes.length : 0
-  } catch {
-    stats.notes = 0
-  }
-  const fromAssets = join(fromDir, 'assets')
-  const toAssets = join(toDir, 'assets')
-  try {
-    const names = await readdir(fromAssets)
-    if (names.length > 0) await mkdir(toAssets, { recursive: true })
-    for (const name of names) {
-      if (!ASSET_PATTERN.test(name)) continue
-      await copyFile(join(fromAssets, name), join(toAssets, name))
-      stats.assets += 1
-    }
-  } catch {
-    // 没有图片目录，跳过。
-  }
-  await rename(fromNotes, join(fromDir, `notes.migrated-${Date.now().toString(36)}.json`)).catch(() => undefined)
-  return stats
-}
-
-function clampSize(value, min, max) {
-  return Math.min(max, Math.max(min, Math.round(value)))
-}
-
-/** 收窄单条便签：字段类型、长度、取值范围都在这里兜住。 */
-function sanitizeNote(raw, fallbackId) {
-  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
-    throw coded(400, 'error.proto.invalidNote', 'note must be an object')
-  }
-  const now = Date.now()
-  const title = typeof raw.title === 'string' ? raw.title.slice(0, MAX_TITLE) : ''
-  const body = typeof raw.body === 'string' ? raw.body.slice(0, MAX_NOTE_BODY) : ''
-  const createdAt = Number.isFinite(raw.createdAt) ? raw.createdAt : now
-  const updatedAt = Number.isFinite(raw.updatedAt) ? raw.updatedAt : createdAt
-  const rawId = typeof raw.id === 'string' && raw.id !== '' ? raw.id : fallbackId
-  const id = typeof rawId === 'string' && rawId !== '' ? rawId.slice(0, MAX_ID) : randomUUID()
-  const color = typeof raw.color === 'string' && PAPER_COLORS.has(raw.color) ? raw.color : ''
-  const note = { id, title, body, color, createdAt, updatedAt }
-  // 卡片尺寸与手动排序位置都是可选的：老数据没有就当没设置。
-  if (Number.isFinite(raw.width)) note.width = clampSize(raw.width, MIN_CARD_WIDTH, MAX_CARD_WIDTH)
-  if (Number.isFinite(raw.height)) note.height = clampSize(raw.height, MIN_CARD_HEIGHT, MAX_CARD_HEIGHT)
-  if (Number.isFinite(raw.order)) note.order = raw.order
-  return note
-}
-
-/** 整份覆盖入口（导入/兼容）。 */
-function sanitizeNotes(input) {
-  const list = input !== null && typeof input === 'object' && Array.isArray(input.notes) ? input.notes : null
-  if (list === null) throw coded(400, 'error.proto.invalidBody', 'notes must be an array')
-  if (list.length > MAX_NOTES) throw coded(400, 'error.proto.tooManyNotes', `at most ${MAX_NOTES} notes`)
-  return list.map((raw) => sanitizeNote(raw))
-}
-
-/** 数据文件坏掉时先留档再重置，避免插件永久卡在「加载失败」。 */
-async function backupCorrupt(filePath) {
-  const backup = join(dirname(filePath), `notes.corrupt-${Date.now().toString(36)}.json`)
-  try {
-    await rename(filePath, backup)
-    return backup
-  } catch {
-    return ''
-  }
-}
-
-async function readDoc(filePath) {
-  let raw
-  try {
-    raw = await readFile(filePath, 'utf8')
-  } catch (caught) {
-    if (caught && caught.code === 'ENOENT') return { version: 0, notes: [], trash: [] }
-    throw caught
-  }
-  try {
-    const parsed = JSON.parse(raw)
-    return {
-      version: Number.isFinite(parsed && parsed.version) ? parsed.version : 0,
-      notes: sanitizeNotes(parsed),
-      trash: sanitizeTrash(parsed && parsed.trash),
-    }
-  } catch {
-    const backup = await backupCorrupt(filePath)
-    return { version: 0, notes: [], trash: [], recovered: true, backup }
-  }
-}
-
-/** 回收站条目 = 便签本体 + deletedAt；过期和超量的直接丢掉。 */
-function sanitizeTrash(input) {
-  if (!Array.isArray(input)) return []
-  const now = Date.now()
-  const seen = new Set()
-  const entries = []
-  for (const raw of input) {
-    if (raw === null || typeof raw !== 'object') continue
-    let note
-    try {
-      note = sanitizeNote(raw)
-    } catch {
-      continue
-    }
-    if (seen.has(note.id)) continue
-    seen.add(note.id)
-    const deletedAt = Number.isFinite(raw.deletedAt) ? raw.deletedAt : now
-    if (now - deletedAt > TRASH_TTL_MS) continue
-    entries.push(Object.assign({}, note, { deletedAt }))
-  }
-  return entries.slice(0, MAX_TRASH)
-}
-
-/** 写盘前把上一份文件轮转成 notes.bak.1..N，坏文件/误改还有得回。 */
-async function rotateSnapshots(filePath) {
-  const dir = dirname(filePath)
-  const snapshot = (index) => join(dir, `notes.bak.${index}.json`)
-  await rm(snapshot(SNAPSHOT_COUNT), { force: true })
-  for (let index = SNAPSHOT_COUNT - 1; index >= 1; index -= 1) {
-    await rename(snapshot(index), snapshot(index + 1)).catch(() => undefined)
-  }
-  await copyFile(filePath, snapshot(1)).catch(() => undefined)
-}
-
-/** 原子写：先轮转快照、落临时文件，再 rename，避免写到一半留下半个 JSON。 */
-async function writeDoc(filePath, doc) {
-  const dir = dirname(filePath)
-  await mkdir(dir, { recursive: true })
-  await rotateSnapshots(filePath)
-  const tmp = join(dir, `.notes.${process.pid}.${Date.now().toString(36)}.tmp`)
-  const payload = `${JSON.stringify({ version: doc.version, notes: doc.notes, trash: doc.trash || [] }, null, 2)}\n`
-  await writeFile(tmp, payload, { encoding: 'utf8', mode: 0o600 })
-  try {
-    await rename(tmp, filePath)
-  } catch (caught) {
-    await rm(tmp, { force: true })
-    throw caught
-  }
-}
-
-/**
- * 读-改-写必须串行：两个请求同时进来时，后一个要看到前一个的结果，
- * 否则后写的那份会把先写的改动整份盖掉。
- */
-let writeQueue = Promise.resolve()
-function serialized(task) {
-  const run = writeQueue.then(task, task)
-  writeQueue = run.then(
-    () => undefined,
-    () => undefined,
-  )
-  return run
 }
 
 function notAllowed(res, method) {
@@ -848,12 +599,230 @@ async function handleConfigSet(req, res, trustedHosts) {
     await writeConfigDir(target)
     return stats
   })
-  forgetDataDir()
   const dir = await resolveDataDir()
   json(res, 200, {
     ok: true,
     data: { dir, defaultDir: defaultDataDir(), custom: Boolean(target), ...result },
   })
+}
+
+/** 工具返回给模型的内容：统一是一段 JSON 文本。 */
+const jsonText = (value) => ({ type: 'text', text: JSON.stringify(value, null, 2) })
+
+/**
+ * 原生工具面：让 DSH 的模型不配 MCP 也能直接读写便签。
+ *
+ * 这些定义是普通的鸭子类型对象（`ctx.tools.register` 只读 name / description /
+ * parameters / output / execute），所以插件不必 import `@deepseek-ai/dsh-tools`，
+ * 也就不需要额外的运行时依赖。
+ */
+function notesTools() {
+  // 每个工具各自一份 output：注册表可能冻结/包装定义，别让多个工具共享同一个对象。
+  const makeOutput = () => ({ schema: { type: 'string' }, render: (_args, value) => [jsonText(value)] })
+  const idSchema = { type: 'string', description: 'Note id returned by notes_list.' }
+  return [
+    {
+      name: 'notes_list',
+      description:
+        'List sticky notes, newest first. Supports a keyword filter over title and body. Call this first to discover note ids.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Case-insensitive keyword matched against title and body.' },
+          limit: { type: 'integer', description: 'Maximum notes to return, 1-200 (default 20).' },
+          includeBody: { type: 'boolean', description: 'Include the full body of every returned note.' },
+        },
+        additionalProperties: false,
+      },
+      output: makeOutput(),
+      isConcurrencySafe: () => true,
+      async execute(args) {
+        return JSON.stringify(await listNotes(args && typeof args === 'object' ? args : {}))
+      },
+    },
+    {
+      name: 'notes_get',
+      description: 'Read one sticky note by id, including its full body.',
+      parameters: {
+        type: 'object',
+        properties: { id: idSchema },
+        required: ['id'],
+        additionalProperties: false,
+      },
+      output: makeOutput(),
+      isConcurrencySafe: () => true,
+      async execute(args) {
+        const id = requireNoteId(args)
+        const note = await getNote(id)
+        if (!note) throw new Error(`note not found: ${id}`)
+        return JSON.stringify(note)
+      },
+    },
+    {
+      name: 'notes_create',
+      description:
+        'Create a sticky note. Title and body are optional; Markdown task lines such as "- [ ] buy milk" render as checkboxes in the panel.',
+      parameters: {
+        type: 'object',
+        properties: {
+          title: { type: 'string', description: 'Short title (up to 200 characters).' },
+          body: { type: 'string', description: 'Note body (up to 20000 characters).' },
+          color: { type: 'string', enum: PAPER_IDS, description: 'Paper color; defaults to pink.' },
+        },
+        additionalProperties: false,
+      },
+      output: makeOutput(),
+      async execute(args) {
+        return JSON.stringify(await createNote(args && typeof args === 'object' ? args : {}))
+      },
+    },
+    {
+      name: 'notes_update',
+      description:
+        'Update a sticky note. Only the fields you pass change. Use mode "append" to add text at the end of the body instead of replacing it.',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: idSchema,
+          title: { type: 'string', description: 'New title.' },
+          body: { type: 'string', description: 'New body, or the text to append when mode is "append".' },
+          color: { type: 'string', enum: PAPER_IDS, description: 'New paper color.' },
+          mode: { type: 'string', enum: ['replace', 'append'], description: 'How body is applied (default replace).' },
+        },
+        required: ['id'],
+        additionalProperties: false,
+      },
+      output: makeOutput(),
+      async execute(args) {
+        const id = requireNoteId(args)
+        const patch = {}
+        if (typeof args.title === 'string') patch.title = args.title
+        if (typeof args.body === 'string') patch.body = args.body
+        if (typeof args.color === 'string') patch.color = args.color
+        if (args.mode === 'append') patch.mode = 'append'
+        if (Object.keys(patch).length === 0) {
+          const note = await getNote(id)
+          if (!note) throw new Error(`note not found: ${id}`)
+          return JSON.stringify(note)
+        }
+        return JSON.stringify(await updateNote(id, patch))
+      },
+    },
+    {
+      name: 'notes_delete',
+      description: 'Move a sticky note to the trash. Recoverable with notes_restore.',
+      parameters: {
+        type: 'object',
+        properties: { id: idSchema },
+        required: ['id'],
+        additionalProperties: false,
+      },
+      output: makeOutput(),
+      async execute(args) {
+        const id = requireNoteId(args)
+        const result = await deleteNote(id)
+        if (!result.removed) throw new Error(`note not found: ${id}`)
+        return JSON.stringify({ id, deleted: true, trashCount: result.trashCount })
+      },
+    },
+    {
+      name: 'notes_trash_list',
+      description: 'List notes currently in the trash, with their deletion time.',
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+      output: makeOutput(),
+      isConcurrencySafe: () => true,
+      async execute() {
+        const entries = await listTrash()
+        return JSON.stringify({
+          total: entries.length,
+          items: entries.map((note) => ({
+            id: note.id,
+            title: note.title,
+            preview: note.body.replace(/\s+/g, ' ').trim().slice(0, 120),
+            deletedAt: note.deletedAt,
+          })),
+        })
+      },
+    },
+    {
+      name: 'notes_restore',
+      description: 'Restore a note from the trash back onto the board.',
+      parameters: {
+        type: 'object',
+        properties: { id: idSchema },
+        required: ['id'],
+        additionalProperties: false,
+      },
+      output: makeOutput(),
+      async execute(args) {
+        const result = await restoreNote(requireNoteId(args))
+        return JSON.stringify({ id: result.note.id, restored: true, trashCount: result.trashCount })
+      },
+    },
+    {
+      name: 'notes_purge',
+      description: 'Permanently delete one trashed note. Irreversible: requires confirm: true.',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: idSchema,
+          confirm: { type: 'boolean', description: 'Must be true; guards against accidental permanent deletion.' },
+        },
+        required: ['id', 'confirm'],
+        additionalProperties: false,
+      },
+      output: makeOutput(),
+      async execute(args) {
+        const id = requireNoteId(args)
+        if (args.confirm !== true) throw new Error('confirm must be true to purge a note permanently')
+        const result = await purgeNote(id)
+        return JSON.stringify({ id, purged: result.purged, trashCount: result.trashCount })
+      },
+    },
+    {
+      name: 'notes_empty_trash',
+      description: 'Permanently delete every trashed note. Irreversible: requires confirm: true.',
+      parameters: {
+        type: 'object',
+        properties: {
+          confirm: { type: 'boolean', description: 'Must be true; guards against accidental permanent deletion.' },
+        },
+        required: ['confirm'],
+        additionalProperties: false,
+      },
+      output: makeOutput(),
+      async execute(args) {
+        if (!args || args.confirm !== true) throw new Error('confirm must be true to empty the trash')
+        return JSON.stringify(await emptyTrash())
+      },
+    },
+  ]
+}
+
+/** 工具入参里的 id 先按同一套字符集校验，避免把奇怪的东西拼进路径/日志。 */
+function requireNoteId(args) {
+  const value = args && typeof args === 'object' ? args.id : undefined
+  if (typeof value !== 'string' || !ID_PATTERN.test(value.trim())) {
+    throw new Error('id must be a note id returned by notes_list')
+  }
+  return value.trim()
+}
+
+/** 工具服务由别的插件提供，取不到就安静跳过，不能让便签面板跟着挂掉。 */
+function toolsOf(ctx) {
+  try {
+    if (typeof ctx.get === 'function') {
+      const service = ctx.get('tools')
+      if (service !== undefined && service !== null) return service
+    }
+  } catch {
+    // 宿主没挂 dsh-tools。
+  }
+  try {
+    return ctx.tools || null
+  } catch {
+    return null
+  }
 }
 
 function apply(ctx) {
@@ -914,6 +883,28 @@ function apply(ctx) {
       }),
     'dsh-sticky-notes: state route',
   )
+
+  // 原生工具：宿主挂了 tools 服务才注册，取不到就算了，不影响面板。
+  const tools = toolsOf(ctx)
+  if (tools && typeof tools.register === 'function') {
+    try {
+      ctx.effect(() => {
+        const disposers = notesTools().map((definition) => tools.register(definition))
+        return () => {
+          for (const dispose of disposers) {
+            try {
+              dispose()
+            } catch {
+              // HMR 期间宿主可能已经先一步清理。
+            }
+          }
+        }
+      }, 'dsh-sticky-notes: tools')
+    } catch (caught) {
+      // 工具名冲突之类的异常不该把面板路由一起带下去。
+      console.error('[dsh-sticky-notes] failed to register tools', caught)
+    }
+  }
 }
 
-export { apply, inject, name }
+export { apply, inject, name, notesTools }

@@ -7,6 +7,8 @@ const read = (name) => readFile(join(root, name), 'utf8')
 
 const client = await read('client.js')
 const index = await read('index.js')
+const store = await read('store.js')
+const mcp = await read('mcp.js')
 const pkg = JSON.parse(await read('package.json'))
 
 const checks = []
@@ -83,7 +85,7 @@ check('palette defines paper / head / ink tokens', /--dsn-paper:/.test(paletteBl
 const cssPapers = [...new Set([...paletteBlock.matchAll(/\.dsn-paper-([a-z]+)\s*\{/g)].map((m) => m[1]))]
 const papersBlock = client.match(/const PAPERS = \[([\s\S]*?)\n    \]/)
 const clientPapers = papersBlock ? [...papersBlock[1].matchAll(/id: '([a-z]+)'/g)].map((m) => m[1]) : []
-const hostColors = index.match(/const PAPER_COLORS = new Set\(\[([^\]]*)\]\)/)
+const hostColors = store.match(/const PAPER_COLORS = new Set\(\[([^\]]*)\]\)/)
 const hostPapers = hostColors ? [...hostColors[1].matchAll(/'([a-z]+)'/g)].map((m) => m[1]) : []
 const sameSet = (a, b) => a.length === b.length && a.length > 0 && a.every((item) => b.includes(item))
 check('paper colors CSS === client PAPERS', sameSet(cssPapers, clientPapers), `${cssPapers} vs ${clientPapers}`)
@@ -111,6 +113,38 @@ check('dsh.bundle.patch declared', pkg.dsh?.bundle?.patch === './cordis.patch.ym
 check('dsh.client.platform web', pkg.dsh?.client?.platform === 'web')
 check('package exports ./client', Boolean(pkg.exports?.['./client']))
 check('package exports ./icon', Boolean(pkg.exports?.['./icon']))
+
+// 11. 数据层与 MCP server 保持零依赖：只允许 node 内置模块与本地文件
+const externalImports = (source) =>
+  [...source.matchAll(/from '([^']+)'/g)]
+    .map((match) => match[1])
+    .filter((spec) => !spec.startsWith('node:') && !spec.startsWith('./'))
+check('store.js imports only node builtins', externalImports(store).length === 0, externalImports(store))
+check('mcp.js imports only node builtins and local files', externalImports(mcp).length === 0, externalImports(mcp))
+check('index.js imports only node builtins and local files', externalImports(index).length === 0, externalImports(index))
+
+// 12. 分发清单与包入口
+check('files ship store.js and mcp.js', ['store.js', 'mcp.js'].every((name) => pkg.files?.includes(name)), pkg.files)
+check('package exports ./mcp', pkg.exports?.['./mcp'] === './mcp.js', pkg.exports?.['./mcp'])
+
+// 13. 三条入口共享同一套工具面：MCP server + DSH 原生工具 + 后台对齐
+const toolNames = ['notes_list', 'notes_get', 'notes_create', 'notes_update', 'notes_delete', 'notes_restore', 'notes_purge']
+check(
+  'mcp server exposes every note tool',
+  toolNames.every((toolName) => mcp.includes(`name: '${toolName}'`)),
+  toolNames.filter((toolName) => !mcp.includes(`name: '${toolName}'`)),
+)
+check(
+  'host registers the native note tools',
+  index.includes('notesTools()') && index.includes('tools.register(definition)') && index.includes("toolsOf(ctx)"),
+  'native tool wiring missing',
+)
+check(
+  'client syncs external changes',
+  client.includes('syncIfStale') && client.includes("addEventListener('visibilitychange'"),
+  'missing background sync',
+)
+check('client poll interval is bounded', /SYNC_INTERVAL = \d{4,6}/.test(client), 'missing SYNC_INTERVAL')
 
 const failed = checks.filter((item) => !item.ok)
 console.log(`\n${checks.length - failed.length}/${checks.length} passed`)

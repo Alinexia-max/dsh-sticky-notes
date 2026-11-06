@@ -9,6 +9,8 @@ const home = await mkdtemp(join(tmpdir(), 'dsn-test-'))
 process.env.DSH_HOME = home
 
 const routes = []
+/** 插件注册进来的原生工具，用来验证 ctx.tools.register 的接线。 */
+const registered = []
 const ctx = {
   effect(fn) {
     const dispose = fn()
@@ -20,6 +22,15 @@ const ctx = {
     register(route) {
       routes.push(route)
       return () => {}
+    },
+  },
+  tools: {
+    register(definition) {
+      registered.push(definition)
+      return () => {
+        const index = registered.indexOf(definition)
+        if (index >= 0) registered.splice(index, 1)
+      }
     },
   },
   root: {},
@@ -322,6 +333,37 @@ check('reset migrates data back', r.json?.data?.skipped === false && r.json.data
 
 r = await call({ method: 'POST', url: `${API}/config`, headers: { 'content-type': 'application/json' }, body: '{}' })
 check('config POST needs marker 403', r.status === 403, r.json)
+
+// ---- 原生工具：ctx.tools.register 的定义与执行 ----
+const tool = (name) => registered.find((item) => item.name === name)
+check(
+  'registers native note tools',
+  ['notes_list', 'notes_get', 'notes_create', 'notes_update', 'notes_delete', 'notes_trash_list', 'notes_restore', 'notes_purge', 'notes_empty_trash'].every(
+    (name) => tool(name) !== undefined,
+  ),
+  registered.map((item) => item.name),
+)
+check(
+  'native tools carry JSON Schema parameters',
+  registered.every((item) => item.parameters && item.parameters.type === 'object' && typeof item.description === 'string'),
+  registered.map((item) => item.name),
+)
+
+let toolError = null
+try {
+  await tool('notes_get').execute({ id: '../etc/passwd' })
+} catch (caught) {
+  toolError = caught
+}
+check('native tool rejects a malformed id', toolError instanceof Error, String(toolError))
+
+const toolNote = JSON.parse(await tool('notes_create').execute({ title: '工具创建', body: '- [ ] 待办' }))
+check('native create returns an id', typeof toolNote.id === 'string', toolNote)
+const toolList = JSON.parse(await tool('notes_list').execute({ query: '工具创建' }))
+check('native list finds the note', toolList.matched === 1, toolList)
+const toolDeleted = JSON.parse(await tool('notes_delete').execute({ id: toolNote.id }))
+check('native delete moves to trash', toolDeleted.deleted === true && toolDeleted.trashCount >= 1, toolDeleted)
+check('native output renders text content', tool('notes_list').output.render({}, '{}')[0].type === 'text', null)
 
 await rm(home, { recursive: true, force: true })
 const failed = checks.filter((item) => !item.ok)
