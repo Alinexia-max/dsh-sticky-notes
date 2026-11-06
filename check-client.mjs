@@ -151,6 +151,100 @@ check(
   'missing pinned UI',
 )
 
+// 14. 正文语义（待办 + 表格 + 预览分块）：marker 区块直接求值跑一遍（和 CSS 的 dsn:palette 一个路数）
+const bodyBegin = client.indexOf('/* dsn:body:begin')
+const bodyEnd = client.indexOf('/* dsn:body:end */')
+const bodyBlock = bodyBegin >= 0 && bodyEnd > bodyBegin ? client.slice(client.indexOf('\n', bodyBegin), bodyEnd) : ''
+const tables = bodyBlock
+  ? new Function(bodyBlock + '\nreturn { tablesOf, setTableCell, tableFromTsv, appendTable, blocksOf };')()
+  : null
+check('body helpers are evaluable', Boolean(tables), 'missing dsn:body block')
+if (tables) {
+  const md = ['| 名称 | 数量 |', '| --- | --- |', '| 苹果 | 2 |', '| 香蕉 | 3 |'].join('\n')
+  const parsed = tables.tablesOf(md)
+  check(
+    'parses a table into header + rows',
+    parsed.length === 1 && parsed[0].startLine === 0 && parsed[0].header.length === 2 && parsed[0].rows.length === 2,
+    JSON.stringify(parsed),
+  )
+  check('finds a table below prose', tables.tablesOf('说明\n' + md)[0]?.startLine === 1, 'start line drifted')
+  const written = tables.setTableCell(md, 0, 1, 1, '5|6')
+  check(
+    'cell edit rewrites exactly one line',
+    written.split('\n').length === 4 && written.split('\n')[3] === '| 香蕉 | 5\\|6 |',
+    written,
+  )
+  const converted = tables.tableFromTsv('name\tage\r\nBob\t3\r\nAda\t4\r\n')
+  check(
+    'tsv becomes a table with header + divider',
+    converted === ['| name | age |', '| --- | --- |', '| Bob | 3 |', '| Ada | 4 |'].join('\n'),
+    converted,
+  )
+  check('single column text is not a table', tables.tableFromTsv('just text') === '', 'not filtered')
+  check('prose with a pipe is not a table', tables.tablesOf('a | b\n--- | ---').length === 0, 'false positive')
+  const inserted = tables.appendTable('已有内容')
+  check(
+    'insert table appends a parseable 3x3 block',
+    inserted.startsWith('已有内容\n\n') && tables.tablesOf(inserted).length === 1 && tables.tablesOf(inserted)[0].header.length === 3,
+    inserted,
+  )
+  check('insert table on empty body has no leading blank line', tables.appendTable('').startsWith('| '), tables.appendTable(''))
+}
+
+// 15. 预览分块：表格整块、待办逐行、其余按段落合并，图片行让位给缩略图
+if (tables) {
+  const sample = [
+    '小标题',
+    '',
+    '| a | b |',
+    '| --- | --- |',
+    '| 1 | 2 |',
+    '',
+    '- [ ] 待办一',
+    '- [x] 待办二',
+    '正文第一行',
+    '正文第二行',
+    '',
+    '![](assets/shot.png)',
+  ].join('\n')
+  const blocks = tables.blocksOf(sample)
+  check(
+    'preview blocks: text / table / todo x2 / text',
+    blocks.length === 5 &&
+      blocks[0].type === 'text' &&
+      blocks[1].type === 'table' &&
+      blocks[2].type === 'todo' &&
+      blocks[2].done === false &&
+      blocks[3].type === 'todo' &&
+      blocks[3].done === true &&
+      blocks[4].type === 'text',
+    blocks.map((block) => block.type).join(','),
+  )
+  check('paragraph keeps its own lines', blocks[4] && blocks[4].lines.length === 2, JSON.stringify(blocks[4]))
+  check('block offset points at the source line', sample.slice(blocks[1].offset).startsWith('| a | b |'), blocks[1].offset)
+  check('image line is not rendered as text', tables.blocksOf('![](assets/shot.png)').length === 0, 'image line leaked')
+  check('table block keeps all rows', blocks[1].table.rows.length === 1, JSON.stringify(blocks[1].table))
+}
+check('client renders md tables', client.includes("className: 'dsn-table'") && client.includes('dsn-table-input'), 'missing table ui')
+check('table paste honours the body cap', client.includes('next.slice(0, MAX_NOTE_BODY)'), 'paste can exceed MAX_NOTE_BODY')
+check(
+  'tables and todos render in full',
+  !client.includes('MAX_TABLE_ROWS') && !client.includes('MAX_TABLES') && !client.includes('dsn-table-more'),
+  'row folding came back',
+)
+
+// 16. 预览/原文切换只靠点正文，卡片和工具栏都不放按钮
+check(
+  'no dedicated mode button anywhere',
+  !client.includes('dsn-foot-btn') && !client.includes('GlyphPencil') && !client.includes('defaultMode'),
+  'stale mode button or switch',
+)
+check(
+  'clicking the preview opens the source editor',
+  client.includes('onPreviewClick') && client.includes('enterEdit'),
+  'missing preview-to-edit entry',
+)
+
 const failed = checks.filter((item) => !item.ok)
 console.log(`\n${checks.length - failed.length}/${checks.length} passed`)
 if (failed.length > 0) process.exitCode = 1

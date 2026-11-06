@@ -35,8 +35,6 @@ window.__ModuleLoader__.load({
     const UNDO_MS = 6000
     /** 面板可见时对齐后台改动的轮询间隔（MCP server / 另一个窗口）。 */
     const SYNC_INTERVAL = 20000
-    /** 卡片上最多直出几条待办，剩下的折成 +N。 */
-    const MAX_TODO_ROWS = 6
     /** 同一个冲突连续出现这么多次就放弃自动合并，转为报错。 */
     const MAX_CONFLICT_ROUNDS = 4
 
@@ -125,9 +123,9 @@ window.__ModuleLoader__.load({
         trashClose: '关闭',
         trashFailed: '回收站操作失败',
         trashPurgeAllConfirm: '再点一次清空',
-        todoList: '待办清单',
         todoToggle: '切换完成状态',
-        todoMore: '更多待办',
+        tableCellEdit: '点击编辑单元格',
+        insertTable: '插入表格',
         pin: '置顶',
         unpin: '取消置顶',
       },
@@ -198,9 +196,9 @@ window.__ModuleLoader__.load({
         trashClose: 'Close',
         trashFailed: 'Trash action failed',
         trashPurgeAllConfirm: 'Click again to empty',
-        todoList: 'Tasks',
         todoToggle: 'Toggle done',
-        todoMore: 'More tasks',
+        tableCellEdit: 'Click to edit cell',
+        insertTable: 'Insert table',
         pin: 'Pin to top',
         unpin: 'Unpin',
       },
@@ -284,12 +282,27 @@ window.__ModuleLoader__.load({
 .dsn-thumb { display: block; width: 56px; height: 42px; border: 1px solid var(--dsn-paper-line); border-radius: 6px; object-fit: cover; }
 .dsn-chip { max-width: 100%; padding: 2px 8px; border-radius: 999px; background: var(--dsn-paper-line); color: inherit; font-size: 11px; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dsn-chip:hover { text-decoration: underline; }
-.dsn-todos { display: flex; flex: 0 0 auto; flex-direction: column; gap: 2px; padding: 0 12px 6px; }
 .dsn-todo { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; cursor: pointer; }
 .dsn-todo-check { flex: 0 0 auto; width: 13px; height: 13px; margin: 0; accent-color: var(--dsn-ink); cursor: pointer; }
 .dsn-todo-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dsn-todo-text[data-done="true"] { text-decoration: line-through; opacity: 0.55; }
-.dsn-todo-more { font-size: 11px; opacity: 0.6; }
+/* 正文里的管道表格：只读渲染 + 点格就地编辑，颜色全走纸张变量，暗色自动跟随。 */
+/* 预览态：正文按块渲染，表格就是表格，不再重复显示管道原文。 */
+.dsn-preview { display: flex; flex: 1 1 auto; flex-direction: column; gap: 6px; width: 100%; min-height: 150px; padding: 10px 14px; overflow: auto; line-height: 1.7; cursor: text; scrollbar-width: thin; }
+.dsn-preview-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.dsn-preview-todo { margin: 0; }
+.dsn-preview-empty { opacity: 0.45; }
+.dsn-table-wrap { max-width: 100%; overflow-x: auto; scrollbar-width: thin; }
+.dsn-table { border-collapse: collapse; font-size: 11px; }
+.dsn-table th, .dsn-table td { padding: 3px 6px; border: 1px solid var(--dsn-paper-line); text-align: left; vertical-align: top; }
+/* 单格超长文本在 160px 处截断，避免一格把整张表撑爆。 */
+.dsn-table-text { display: block; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsn-table th { background: var(--dsn-paper-head); font-weight: 600; }
+.dsn-table td { cursor: text; }
+.dsn-table td:hover { background: var(--dsn-paper-line); }
+.dsn-table td:focus-visible { outline: 2px solid var(--dsn-ink); outline-offset: -2px; }
+.dsn-table-cell--editing { padding: 0; }
+.dsn-table-input { width: 100%; min-width: 64px; padding: 3px 6px; border: 0; background: var(--dsn-paper); color: var(--dsn-ink); font: inherit; outline: none; }
 .dsn-note-foot { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; padding: 0 14px 10px; color: inherit; font-size: 11px; opacity: 0.55; }
 .dsn-note-count { margin-left: auto; font-variant-numeric: tabular-nums; }
 .dsn-note-foot[data-limit="true"] { opacity: 0.85; font-weight: 600; }
@@ -411,9 +424,7 @@ window.__ModuleLoader__.load({
       return note !== null && typeof note === 'object' && String(note.title || '').trim() === '' && String(note.body || '').trim() === ''
     }
 
-    /** `- [ ]` / `- [x]` 待办行；不改数据结构，正文本身就是唯一事实。 */
-    const TODO_PATTERN = /^(\s*)[-*]\s+\[( |x|X)\]\s?(.*)$/
-
+    /** 待办行的正则定义在下方 dsn:body 区块里，和表格解析放在一起便于整块求值测试。 */
     function todosOf(body) {
       const lines = String(body || '').split('\n')
       const todos = []
@@ -436,6 +447,173 @@ window.__ModuleLoader__.load({
       lines[lineIndex] = `${match[1]}- [${done ? ' ' : 'x'}] ${match[3]}`
       return lines.join('\n')
     }
+
+    /* dsn:body:begin — 正文的纯文本语义：待办 / 表格的解析、单格写回、TSV 转换、预览分块。check-client.mjs 会整块求值。 */
+    /** `- [ ]` / `- [x]` 待办行；不改数据结构，正文本身就是唯一事实。 */
+    const TODO_PATTERN = /^(\s*)[-*]\s+\[( |x|X)\]\s?(.*)$/
+    /** 表格行必须以 `|` 开头，正文里随手写的 `a | b` 不算表格。 */
+    const TABLE_LINE = /^\s*\|/
+    /** 分隔行 `|---|:--:|`，决定上一行是表头。 */
+    const TABLE_DIVIDER = /^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)*\|?\s*$/
+
+    /** 拆一行：处理 `\|` 转义与首尾竖线。 */
+    function splitRow(line) {
+      let text = String(line == null ? '' : line).trim()
+      if (text.startsWith('|')) text = text.slice(1)
+      if (text.endsWith('|') && !text.endsWith('\\|')) text = text.slice(0, -1)
+      const cells = []
+      let current = ''
+      for (let index = 0; index < text.length; index += 1) {
+        const char = text[index]
+        if (char === '\\' && text[index + 1] === '|') {
+          current += '|'
+          index += 1
+          continue
+        }
+        if (char === '|') {
+          cells.push(current.trim())
+          current = ''
+          continue
+        }
+        current += char
+      }
+      cells.push(current.trim())
+      return cells
+    }
+
+    /** 一格里的竖线和换行都要收拾掉，否则会把表格拆坏。 */
+    function cellOf(value) {
+      return String(value == null ? '' : value)
+        .replace(/\r?\n/g, ' ')
+        .replace(/\|/g, '\\|')
+        .trim()
+    }
+
+    function rowOf(cells) {
+      return `| ${cells.map(cellOf).join(' | ')} |`
+    }
+
+    /** 解析正文里的管道表格，返回起始行号 + 表头 + 数据行。 */
+    function tablesOf(body) {
+      const lines = String(body || '').split('\n')
+      const tables = []
+      for (let index = 0; index < lines.length - 1; index += 1) {
+        if (!TABLE_LINE.test(lines[index]) || !TABLE_DIVIDER.test(lines[index + 1])) continue
+        const rows = []
+        let cursor = index + 2
+        while (cursor < lines.length && TABLE_LINE.test(lines[cursor]) && !TABLE_DIVIDER.test(lines[cursor])) {
+          rows.push(splitRow(lines[cursor]))
+          cursor += 1
+        }
+        tables.push({ startLine: index, header: splitRow(lines[index]), rows })
+        index = cursor - 1
+      }
+      return tables
+    }
+
+    /** 写回一格：`row` 为 -1 时写表头，只动这一行，其余字符原样保留。 */
+    function setTableCell(body, startLine, row, col, value) {
+      const text = String(body || '')
+      const lines = text.split('\n')
+      const table = tablesOf(text).find((item) => item.startLine === startLine)
+      if (!table) return body
+      const lineIndex = row < 0 ? startLine : startLine + 2 + row
+      if (typeof lines[lineIndex] !== 'string') return body
+      const cells = splitRow(lines[lineIndex])
+      while (cells.length <= col) cells.push('')
+      cells[col] = value
+      lines[lineIndex] = rowOf(cells)
+      return lines.join('\n')
+    }
+
+    /** Excel 复制的区域是 TSV：至少两列才当表格，首行按表头处理。 */
+    function tableFromTsv(text) {
+      const rows = String(text || '')
+        .replace(/\r\n?/g, '\n')
+        .replace(/\n+$/, '')
+        .split('\n')
+        .map((line) => line.split('\t').map((cell) => cell.replace(/\s+/g, ' ').trim()))
+      if (rows.length === 0) return ''
+      const width = rows.reduce((max, row) => Math.max(max, row.length), 0)
+      if (width < 2) return ''
+      const pad = (row) => {
+        const next = row.slice()
+        while (next.length < width) next.push('')
+        return next
+      }
+      const [header, ...rest] = rows
+      const divider = `| ${pad([]).map(() => '---').join(' | ')} |`
+      return [rowOf(pad(header)), divider, ...rest.map((row) => rowOf(pad(row)))].join('\n')
+    }
+
+    /** 菜单里「插入表格」：正文末尾补一张 3×3 空表，表头留空由用户点着填。 */
+    function appendTable(body) {
+      const empty = ['|  |  |  |', '| --- | --- | --- |', '|  |  |  |', '|  |  |  |']
+      const text = String(body || '').replace(/\s+$/, '')
+      return text === '' ? empty.join('\n') : `${text}\n\n${empty.join('\n')}`
+    }
+
+    /** 整行只有一个图片引用时，预览里由底部缩略图代表，正文行不再重复显示。 */
+    const IMAGE_LINE = /^\s*!\[[^\]]*\]\(\s*assets\/[A-Za-z0-9._-]+\s*\)\s*$/
+
+    /**
+     * 预览态把正文切成块：表格整块、待办逐行、其余行按段落合并（图片行隐藏）。
+     * 每块记着正文里的字符偏移，点哪一块就能把光标放到那一行。
+     */
+    function blocksOf(body) {
+      const lines = String(body || '').split('\n')
+      const offsets = []
+      let offset = 0
+      for (const line of lines) {
+        offsets.push(offset)
+        offset += line.length + 1
+      }
+      const tableStarts = new Map(tablesOf(body).map((table) => [table.startLine, table]))
+      const blocks = []
+      let paragraph = null
+      const flush = () => {
+        if (!paragraph) return
+        blocks.push(paragraph)
+        paragraph = null
+      }
+      let index = 0
+      while (index < lines.length) {
+        const table = tableStarts.get(index)
+        if (table) {
+          flush()
+          blocks.push({ type: 'table', table, offset: offsets[index] })
+          let cursor = index + 2
+          while (cursor < lines.length && TABLE_LINE.test(lines[cursor]) && !TABLE_DIVIDER.test(lines[cursor])) cursor += 1
+          index = cursor
+          continue
+        }
+        const line = lines[index]
+        const todo = TODO_PATTERN.exec(line)
+        if (todo) {
+          flush()
+          blocks.push({
+            type: 'todo',
+            index,
+            offset: offsets[index],
+            done: todo[2].toLowerCase() === 'x',
+            text: todo[3].trim(),
+          })
+          index += 1
+          continue
+        }
+        if (line.trim() === '' || IMAGE_LINE.test(line)) {
+          flush()
+          index += 1
+          continue
+        }
+        if (!paragraph) paragraph = { type: 'text', offset: offsets[index], lines: [] }
+        paragraph.lines.push(line)
+        index += 1
+      }
+      flush()
+      return blocks
+    }
+    /* dsn:body:end */
 
     /** 正文里引用的截图（相对路径，由 Host 端 assets 路由提供）。 */
     function imagesOf(body) {
@@ -550,8 +728,18 @@ window.__ModuleLoader__.load({
       const links = linksOf(note.body)
       const todos = todosOf(note.body)
       const doneTodos = todos.filter((todo) => todo.done).length
+      const tables = tablesOf(note.body)
       const cardRef = useRef(null)
       const bodyRef = useRef(null)
+      /** preview：正文按块渲染（表格就是表格）；edit：显示原始文本。空便签直接从编辑态开始。 */
+      const [mode, setMode] = useState(() => (String(note.body || '').trim() === '' ? 'edit' : 'preview'))
+      const blocks = useMemo(() => blocksOf(note.body), [note.body])
+      /** 正在编辑的单元格：`{ startLine, row, col, value }`，row 为 -1 表示表头。 */
+      const [editingCell, setEditingCell] = useState(null)
+      const editingRef = useRef(null)
+      editingRef.current = editingCell
+      /** Escape 退出时不要再把草稿写回。 */
+      const cancelRef = useRef(false)
       /** 只有按在右下角缩放柄上的拖拽才算「用户改尺寸」。 */
       const resizingRef = useRef(false)
 
@@ -580,8 +768,13 @@ window.__ModuleLoader__.load({
         }
       }, [note.id, note.width, note.height, props.onChange])
 
-      /** Tab 缩进两格、Shift+Tab 回退；受控 textarea 要在重渲染后再摆光标。 */
+      /** Tab 缩进两格、Shift+Tab 回退、Esc 收起真身回到预览；受控 textarea 要在重渲染后再摆光标。 */
       const onBodyKeyDown = (event) => {
+        if (event.key === 'Escape' && !event.isComposing) {
+          event.preventDefault()
+          setMode('preview')
+          return
+        }
         if (event.key !== 'Tab' || event.altKey || event.ctrlKey || event.metaKey || event.isComposing) return
         const element = bodyRef.current
         if (!element) return
@@ -615,6 +808,78 @@ window.__ModuleLoader__.load({
         })
       }
 
+      /** 提交当前单元格：先退出编辑态，值没变就不产生一次保存。 */
+      const commitCell = () => {
+        const target = editingRef.current
+        setEditingCell(null)
+        if (!target) return
+        if (cancelRef.current) {
+          cancelRef.current = false
+          return
+        }
+        const table = tables.find((item) => item.startLine === target.startLine)
+        if (!table) return
+        const cells = target.row < 0 ? table.header : table.rows[target.row]
+        const before = cells && typeof cells[target.col] === 'string' ? cells[target.col] : ''
+        if (before === target.value) return
+        props.onChange(note.id, {
+          body: setTableCell(note.body, target.startLine, target.row, target.col, target.value),
+        })
+      }
+
+      const beginCellEdit = (startLine, row, col, value) => {
+        cancelRef.current = false
+        setEditingCell({ startLine, row, col, value })
+      }
+
+      /** 一格：平时是只读文本，点一下换成同尺寸输入框。 */
+      const renderCell = (table, rowIndex, colIndex, text) => {
+        const active = editingCell && editingCell.startLine === table.startLine && editingCell.row === rowIndex && editingCell.col === colIndex
+        if (active) {
+          return h(
+            'td',
+            { key: colIndex, className: 'dsn-table-cell dsn-table-cell--editing' },
+            h('input', {
+              className: 'dsn-table-input',
+              value: editingCell.value,
+              maxLength: 200,
+              autoFocus: true,
+              'aria-label': t('tableCellEdit'),
+              onChange: (event) => setEditingCell({ ...editingCell, value: event.target.value }),
+              onBlur: commitCell,
+              onKeyDown: (event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault()
+                  commitCell()
+                  return
+                }
+                if (event.key === 'Escape') {
+                  event.preventDefault()
+                  cancelRef.current = true
+                  setEditingCell(null)
+                }
+              },
+            }),
+          )
+        }
+        return h(
+          'td',
+          {
+            key: colIndex,
+            className: 'dsn-table-cell',
+            tabIndex: 0,
+            title: t('tableCellEdit'),
+            onClick: () => beginCellEdit(table.startLine, rowIndex, colIndex, text),
+            onKeyDown: (event) => {
+              if (event.key !== 'Enter' && event.key !== ' ') return
+              event.preventDefault()
+              beginCellEdit(table.startLine, rowIndex, colIndex, text)
+            },
+          },
+          text === '' ? '\u00a0' : h('span', { className: 'dsn-table-text' }, text),
+        )
+      }
+
       /** 粘贴截图：交给上层上传，正文里补一行 ![](assets/xxx.png)。 */
       const onBodyPaste = (event) => {
         const clipboard = event.clipboardData
@@ -627,6 +892,140 @@ window.__ModuleLoader__.load({
           props.onPasteImage(note.id, file)
           return
         }
+        // 从 Excel 复制的区域是 TSV：两列以上就转成管道表格插到光标处。
+        const plain = typeof clipboard.getData === 'function' ? clipboard.getData('text/plain') : ''
+        if (!plain || plain.indexOf('\t') < 0) return
+        const table = tableFromTsv(plain)
+        if (table === '') return
+        event.preventDefault()
+        const element = bodyRef.current
+        const value = note.body
+        const start = element && Number.isFinite(element.selectionStart) ? element.selectionStart : value.length
+        const end = element && Number.isFinite(element.selectionEnd) ? element.selectionEnd : value.length
+        const lead = start > 0 && value[start - 1] !== '\n' ? '\n' : ''
+        const tail = end < value.length && value[end] !== '\n' ? '\n' : ''
+        const caret = start + lead.length + table.length
+        // 正文上限与 textarea 的 maxLength 一致，超了就按服务端规则截断。
+        const next = `${value.slice(0, start)}${lead}${table}${tail}${value.slice(end)}`
+        props.onChange(note.id, { body: next.slice(0, MAX_NOTE_BODY) })
+        if (!element) return
+        requestAnimationFrame(() => {
+          try {
+            element.setSelectionRange(caret, caret)
+          } catch {
+            // 控件可能已经卸载。
+          }
+        })
+      }
+
+      /** 从预览进原文编辑：光标落到点到的那一行。 */
+      const enterEdit = (offset) => {
+        setMode('edit')
+        const position = Math.max(0, Math.min(Number(offset) || 0, String(note.body || '').length))
+        requestAnimationFrame(() => {
+          const element = bodyRef.current
+          if (!element) return
+          try {
+            element.focus()
+            element.setSelectionRange(position, position)
+          } catch {
+            // 控件可能已经卸载。
+          }
+        })
+      }
+
+      /** 点预览空白处进编辑；表格和待办自己吃掉点击，不会整块跳去编辑态。 */
+      const onPreviewClick = (event) => {
+        const node = event.target && typeof event.target.closest === 'function' ? event.target.closest('[data-offset]') : null
+        enterEdit(node ? Number(node.getAttribute('data-offset')) || 0 : 0)
+      }
+
+      // 点卡片外面就收起真身，回到「表格就是表格」的样子。
+      useEffect(() => {
+        if (mode !== 'edit') return
+        const onDown = (event) => {
+          const element = cardRef.current
+          if (!element || element.contains(event.target)) return
+          setMode('preview')
+        }
+        window.addEventListener('pointerdown', onDown)
+        return () => window.removeEventListener('pointerdown', onDown)
+      }, [mode])
+
+      /** 一张表：表头 + 全部数据行，不去截断（卡片不够高就在预览里滚动）。 */
+      const renderTable = (table) => {
+        const width = table.rows.reduce((max, row) => Math.max(max, row.length), table.header.length)
+        const cellsOf = (row) =>
+          Array.from({ length: width }, (_, colIndex) => (typeof row[colIndex] === 'string' ? row[colIndex] : ''))
+        return h(
+          'div',
+          { className: 'dsn-table-wrap', key: `table-${table.startLine}` },
+          h(
+            'table',
+            { className: 'dsn-table' },
+            h(
+              'thead',
+              null,
+              h('tr', null, cellsOf(table.header).map((text, colIndex) => renderCell(table, -1, colIndex, text))),
+            ),
+            h(
+              'tbody',
+              null,
+              table.rows.map((row, rowIndex) =>
+                h(
+                  'tr',
+                  { key: rowIndex },
+                  cellsOf(row).map((text, colIndex) => renderCell(table, rowIndex, colIndex, text)),
+                ),
+              ),
+            ),
+          ),
+        )
+      }
+
+      /** 预览态一块：表格 / 待办 / 文本段落，都带着自己在正文里的偏移。 */
+      const renderBlock = (block) => {
+        if (block.type === 'table') {
+          return h(
+            'div',
+            {
+              key: `table-block-${block.offset}`,
+              className: 'dsn-preview-table',
+              'data-offset': block.offset,
+              onClick: (event) => event.stopPropagation(),
+            },
+            renderTable(block.table),
+          )
+        }
+        if (block.type === 'todo') {
+          return h(
+            'label',
+            {
+              key: `todo-${block.index}`,
+              className: 'dsn-todo dsn-preview-todo',
+              'data-offset': block.offset,
+              onClick: (event) => event.stopPropagation(),
+            },
+            h('input', {
+              type: 'checkbox',
+              className: 'dsn-todo-check',
+              checked: block.done,
+              'aria-label': t('todoToggle'),
+              onChange: () => props.onChange(note.id, { body: toggleTodo(note.body, block.index) }),
+            }),
+            h('span', { className: 'dsn-todo-text', 'data-done': block.done ? 'true' : 'false' }, block.text || '—'),
+          )
+        }
+        return h(
+          'div',
+          { key: `text-${block.offset}`, className: 'dsn-preview-text', 'data-offset': block.offset },
+          block.lines.join('\n'),
+        )
+      }
+
+      const previewNodes = blocks.map((block) => renderBlock(block))
+      if (blocks.length === 0) {
+        previewNodes.push(h('div', { key: 'preview-empty', className: 'dsn-preview-empty' }, t('bodyPlaceholder')))
       }
 
       return h(
@@ -737,41 +1136,24 @@ window.__ModuleLoader__.load({
             '×',
           ),
         ),
-        h('textarea', {
-          ref: bodyRef,
-          className: 'dsn-note-body',
-          value: note.body,
-          maxLength: MAX_NOTE_BODY,
-          placeholder: t('bodyPlaceholder'),
-          'aria-label': t('bodyPlaceholder'),
-          spellCheck: false,
-          onChange: (event) => props.onChange(note.id, { body: event.target.value }),
-          onKeyDown: onBodyKeyDown,
-          onPaste: onBodyPaste,
-        }),
-        todos.length > 0
-          ? h(
+        mode === 'edit'
+          ? h('textarea', {
+              ref: bodyRef,
+              className: 'dsn-note-body',
+              value: note.body,
+              maxLength: MAX_NOTE_BODY,
+              placeholder: t('bodyPlaceholder'),
+              'aria-label': t('bodyPlaceholder'),
+              spellCheck: false,
+              onChange: (event) => props.onChange(note.id, { body: event.target.value }),
+              onKeyDown: onBodyKeyDown,
+              onPaste: onBodyPaste,
+            })
+          : h(
               'div',
-              { className: 'dsn-todos', role: 'group', 'aria-label': t('todoList') },
-              todos.slice(0, MAX_TODO_ROWS).map((todo) =>
-                h(
-                  'label',
-                  { className: 'dsn-todo', key: todo.index },
-                  h('input', {
-                    type: 'checkbox',
-                    className: 'dsn-todo-check',
-                    checked: todo.done,
-                    'aria-label': t('todoToggle'),
-                    onChange: () => props.onChange(note.id, { body: toggleTodo(note.body, todo.index) }),
-                  }),
-                  h('span', { className: 'dsn-todo-text', 'data-done': todo.done ? 'true' : 'false' }, todo.text || '—'),
-                ),
-              ),
-              todos.length > MAX_TODO_ROWS
-                ? h('div', { className: 'dsn-todo-more', title: t('todoMore') }, `+${todos.length - MAX_TODO_ROWS}`)
-                : null,
-            )
-          : null,
+              { className: 'dsn-preview', 'aria-label': t('bodyPlaceholder'), onClick: onPreviewClick },
+              previewNodes,
+            ),
         images.length > 0 || links.length > 0
           ? h(
               'div',
@@ -836,6 +1218,19 @@ window.__ModuleLoader__.load({
                     onClick: () => props.onColor(note.id, paper.id),
                   }),
                 ),
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsn-menu-item',
+                  role: 'menuitem',
+                  onClick: () => {
+                    props.onChange(note.id, { body: appendTable(note.body).slice(0, MAX_NOTE_BODY) })
+                    props.onToggleMenu(note.id)
+                  },
+                },
+                t('insertTable'),
               ),
               h(
                 'button',
