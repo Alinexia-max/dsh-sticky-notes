@@ -95,6 +95,8 @@ const initialize = (client) =>
       response.result,
     )
     check('advertises tools capability', response.result?.capabilities?.tools !== undefined, response.result)
+    check('advertises resources capability', response.result?.capabilities?.resources !== undefined, response.result)
+    check('echoes the client protocol version', response.result?.protocolVersion === '2025-11-25', response.result)
     check('serverInfo name', response.result?.serverInfo?.name === 'dsh-sticky-notes', response.result?.serverInfo)
 
     client.notify('notifications/initialized')
@@ -122,6 +124,25 @@ const initialize = (client) =>
 
     response = await client.request('tools/call', { name: 'notes_list', arguments: { query: 'MCP' } })
     check('list finds the new note', JSON.parse(textOf(response)).matched === 1, textOf(response))
+
+    response = await client.request('resources/list')
+    const resources = response.result?.resources || []
+    check(
+      'resources/list mirrors the notes',
+      resources.length === 1 && resources[0].uri.startsWith('notes://') && resources[0].mimeType === 'text/markdown',
+      resources,
+    )
+    const noteUri = resources[0]?.uri
+    response = await client.request('resources/read', { uri: noteUri })
+    check(
+      'resources/read returns the note as markdown',
+      String(response.result?.contents?.[0]?.text || '').includes('来自 MCP'),
+      response.result,
+    )
+    response = await client.request('resources/read', { uri: 'notes://../etc/passwd' })
+    check('bad resource uri is a JSON-RPC error', response.error?.code === -32602, response)
+    response = await client.request('resources/read', { uri: 'notes://no-such-note' })
+    check('missing resource is a JSON-RPC error', response.error?.code === -32602, response)
 
     response = await client.request('tools/call', { name: 'notes_get', arguments: { id: 'no-such-note' } })
     check('missing note is an isError result', response.result?.isError === true, response)

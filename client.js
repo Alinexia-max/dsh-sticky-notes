@@ -1,4 +1,4 @@
-/* global window, document, crypto */
+/* global window, document, crypto, URL, Blob, FileReader */
 window.__ModuleLoader__.load({
   id: '@local/dsh-sticky-notes',
   factory(require) {
@@ -16,6 +16,10 @@ window.__ModuleLoader__.load({
     const NOTES_PATH = `${API_PREFIX}/notes`
     const TRASH_PATH = `${API_PREFIX}/trash`
     const ASSETS_PATH = `${API_PREFIX}/assets`
+    const SNAPSHOTS_PATH = `${API_PREFIX}/snapshots`
+    const EXPORT_PATH = `${API_PREFIX}/export`
+    const IMPORT_PATH = `${API_PREFIX}/import`
+    const STORAGE_PATH = `${API_PREFIX}/storage`
     const MARKER_HEADER = 'x-dsh-sticky-notes'
     const SAVE_DELAY = 600
     /** 与 index.js 的 MAX_TITLE / MAX_NOTE_BODY / MAX_NOTES 保持一致。 */
@@ -54,6 +58,14 @@ window.__ModuleLoader__.load({
       { id: 'updated', label: 'sortUpdated' },
       { id: 'title', label: 'sortTitle' },
     ]
+
+    /** 快照来源 → 文案 key，和后端 listSnapshots 的 kind 一一对应。 */
+    const SNAPSHOT_KINDS = {
+      auto: 'snapshotKindAuto',
+      preRestore: 'snapshotKindPreRestore',
+      corrupt: 'snapshotKindCorrupt',
+      migrated: 'snapshotKindMigrated',
+    }
 
     const DICT = {
       zh: {
@@ -128,6 +140,45 @@ window.__ModuleLoader__.load({
         insertTable: '插入表格',
         pin: '置顶',
         unpin: '取消置顶',
+        data: '数据',
+        dataTitle: '数据与备份',
+        dataClose: '关闭',
+        dataBusy: '处理中…',
+        dataFailed: '操作失败',
+        snapshotSection: '快照历史',
+        snapshotHint: '每次保存前会自动轮转一份快照；恢复前还会把当前数据另存一份。',
+        snapshotEmpty: '还没有可恢复的快照',
+        snapshotRestore: '恢复',
+        snapshotRestored: '已恢复快照',
+        snapshotKindAuto: '自动',
+        snapshotKindPreRestore: '恢复前',
+        snapshotKindCorrupt: '损坏留档',
+        snapshotKindMigrated: '迁移留档',
+        snapshotBroken: '无法解析',
+        exportSection: '导入 / 导出',
+        exportJson: '导出 JSON',
+        exportMarkdown: '导出 Markdown',
+        exportHint: 'JSON 备份可直接再导入；Markdown 带图片时会打包成 zip。',
+        exportDone: '已导出',
+        exportFailed: '导出失败',
+        importAction: '导入…',
+        importHint: '选择导出的 JSON 备份。按 id 合并，不会覆盖更新过的便签。',
+        importDone: '已导入',
+        importFailed: '导入失败',
+        importInvalid: '不是有效的 JSON 备份',
+        importConflict: '数据已被其他窗口改动，请重试',
+        assetSection: '图片占用',
+        assetHint: '孤儿图片没有被任何便签引用，可以安全清理；刚上传不到一分钟的先不算孤儿。',
+        assetPrune: '清理孤儿',
+        assetPruned: '已清理',
+        assetClean: '没有孤儿图片',
+        assetOrphan: '孤儿',
+        assetRecent: '新上传',
+        assetMissing: '断链',
+        notesDropped: '已跳过无法识别的便签',
+        importOverflow: '超出上限未导入',
+        importAssetsFailed: '图片写入失败',
+        exportTruncated: '部分图片超出体积上限未打包',
       },
       en: {
         nav: 'Notes',
@@ -201,6 +252,46 @@ window.__ModuleLoader__.load({
         insertTable: 'Insert table',
         pin: 'Pin to top',
         unpin: 'Unpin',
+        data: 'Data',
+        dataTitle: 'Data & backups',
+        dataClose: 'Close',
+        dataBusy: 'Working…',
+        dataFailed: 'Action failed',
+        snapshotSection: 'Snapshots',
+        snapshotHint: 'One snapshot is rotated before every save; restoring also archives the current state first.',
+        snapshotEmpty: 'No snapshot to restore yet',
+        snapshotRestore: 'Restore',
+        snapshotRestored: 'Snapshot restored',
+        snapshotKindAuto: 'Auto',
+        snapshotKindPreRestore: 'Before restore',
+        snapshotKindCorrupt: 'Recovered',
+        snapshotKindMigrated: 'Migrated',
+        snapshotBroken: 'Unreadable',
+        exportSection: 'Import / export',
+        exportJson: 'Export JSON',
+        exportMarkdown: 'Export Markdown',
+        exportHint: 'JSON backups can be imported again; Markdown is zipped when it includes images.',
+        exportDone: 'Exported',
+        exportFailed: 'Export failed',
+        importAction: 'Import…',
+        importHint: 'Pick a JSON backup. Notes merge by id, so newer local notes are never overwritten.',
+        importDone: 'Imported',
+        importFailed: 'Import failed',
+        importInvalid: 'Not a valid JSON backup',
+        importConflict: 'Data changed in another window, try again',
+        assetSection: 'Images',
+        assetHint:
+          'Orphan images are not referenced by any note and can be removed safely; uploads from the last minute are left alone.',
+        assetPrune: 'Remove orphans',
+        assetPruned: 'Removed',
+        assetClean: 'No orphan images',
+        assetOrphan: 'orphans',
+        assetRecent: 'new',
+        assetMissing: 'Missing',
+        notesDropped: 'Unreadable notes skipped',
+        importOverflow: 'over the limit, not imported',
+        importAssetsFailed: 'image writes failed',
+        exportTruncated: 'some images skipped (size cap)',
       },
     }
 
@@ -293,6 +384,18 @@ window.__ModuleLoader__.load({
 .dsn-preview-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .dsn-preview-todo { margin: 0; }
 .dsn-preview-empty { opacity: 0.45; }
+/* 正文的 Markdown 复合块：标题 / 代码块 / 列表，配色只走纸张变量 */
+.dsn-preview-heading { font-weight: 600; line-height: 1.45; overflow-wrap: anywhere; }
+.dsn-preview-heading[data-level="1"] { font-size: 16px; }
+.dsn-preview-heading[data-level="2"] { font-size: 15px; }
+.dsn-preview-heading[data-level="3"] { font-size: 14px; }
+.dsn-preview-heading[data-level="4"], .dsn-preview-heading[data-level="5"], .dsn-preview-heading[data-level="6"] { font-size: 13px; }
+.dsn-preview-code { margin: 0; padding: 6px 8px; border: 1px solid var(--dsn-paper-line); border-radius: 6px; background: var(--dsn-paper-head); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; line-height: 1.6; white-space: pre; overflow-x: auto; scrollbar-width: thin; }
+.dsn-preview-code code { font: inherit; }
+.dsn-inline-code { padding: 0 4px; border-radius: 4px; background: var(--dsn-paper-head); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.92em; }
+.dsn-md-link { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.dsn-preview-list { margin: 0; padding-left: 18px; }
+.dsn-preview-list li { overflow-wrap: anywhere; }
 .dsn-table-wrap { max-width: 100%; overflow-x: auto; scrollbar-width: thin; }
 .dsn-table { border-collapse: collapse; font-size: 11px; }
 .dsn-table th, .dsn-table td { padding: 3px 6px; border: 1px solid var(--dsn-paper-line); text-align: left; vertical-align: top; }
@@ -345,16 +448,24 @@ window.__ModuleLoader__.load({
 .dsn-trash-meta { color: var(--dsw-alias-label-secondary); font-size: 11px; }
 .dsn-trash-actions { display: flex; flex: 0 0 auto; gap: 6px; }
 .dsn-trash-empty { padding: 18px 0; color: var(--dsw-alias-label-secondary); font-size: 12px; text-align: center; }
-.dsn-trash-list { display: flex; flex-direction: column; gap: 6px; max-height: 320px; overflow-y: auto; padding-right: 2px; scrollbar-width: thin; }
-.dsn-trash-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; }
-.dsn-trash-main { flex: 1 1 auto; min-width: 0; }
-.dsn-trash-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
-.dsn-trash-time { color: var(--dsw-alias-label-secondary); font-size: 11px; }
+/* 数据与备份：快照 / 导入导出 / 图片占用三段叠在一个弹窗里 */
+.dsn-modal-card--tall { max-width: 560px; max-height: 84%; overflow-y: auto; scrollbar-width: thin; }
+.dsn-section { display: flex; flex-direction: column; gap: 8px; padding-top: 12px; border-top: 1px solid var(--dsw-alias-border-l1); }
+.dsn-section-head { display: flex; align-items: center; gap: 8px; }
+.dsn-section-title { color: var(--dsw-alias-label-primary); font-size: 12px; font-weight: 600; }
+.dsn-hint { color: var(--dsw-alias-label-secondary); font-size: 11px; line-height: 1.6; }
+.dsn-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.dsn-list { display: flex; flex-direction: column; gap: 6px; max-height: 220px; margin: 0; padding: 0; overflow-y: auto; list-style: none; scrollbar-width: thin; }
+.dsn-list-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; background: var(--dsw-alias-bg-base); }
+.dsn-list-text { flex: 1 1 auto; min-width: 0; }
+.dsn-list-name { overflow: hidden; color: var(--dsw-alias-label-primary); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.dsn-list-meta { color: var(--dsw-alias-label-secondary); font-size: 11px; }
+.dsn-tag { flex: 0 0 auto; padding: 1px 6px; border-radius: 999px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary); font-size: 10px; }
+.dsn-hidden-input { display: none; }
 `
 
     /** 插件路由按页面基址解析，兼容 DSH 挂在反向代理子路径下的情况。 */
     function resolveApiUrl(path) {
-      if (!path.startsWith('/')) return path
       try {
         const base = new URL(document.baseURI)
         if (!base.pathname.endsWith('/')) base.pathname += '/'
@@ -385,6 +496,55 @@ window.__ModuleLoader__.load({
       } catch {
         return ''
       }
+    }
+
+    /** 人类可读的文件大小：B / KB / MB。 */
+    function formatSize(bytes) {
+      const value = Number(bytes)
+      if (!Number.isFinite(value) || value <= 0) return '0 B'
+      if (value < 1024) return `${Math.round(value)} B`
+      if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
+      return `${(value / (1024 * 1024)).toFixed(1)} MB`
+    }
+
+    /** 下载文件名用的时间戳，和 Host 端导出命名保持同一种形态。 */
+    function fileStamp() {
+      const pad = (value) => String(value).padStart(2, '0')
+      const now = new Date()
+      return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`
+    }
+
+    /** 触发浏览器下载：不往 body 里插节点，卸载后也不会留下垃圾。 */
+    function triggerDownload(blob, filename) {
+      let url = ''
+      try {
+        url = URL.createObjectURL(blob)
+        const anchor = document.createElement('a')
+        anchor.href = url
+        anchor.download = filename
+        anchor.rel = 'noopener'
+        anchor.click()
+      } finally {
+        if (url !== '') window.setTimeout(() => URL.revokeObjectURL(url), 10000)
+      }
+    }
+
+    /** 从 Content-Disposition 里取文件名，取不到就用兜底名。 */
+    function filenameOf(response, fallback) {
+      const header = String((response && response.headers && response.headers.get('content-disposition')) || '')
+      const match = /filename="([^"]+)"/.exec(header)
+      return match ? match[1] : fallback
+    }
+
+    /** 读本地文件文本：优先 File.text()，老环境退回 FileReader。 */
+    function readTextFile(file) {
+      if (file && typeof file.text === 'function') return file.text()
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(String(reader.result || ''))
+        reader.onerror = () => reject(reader.error || new Error('read failed'))
+        reader.readAsText(file)
+      })
     }
 
     /** 正文第一行：标题为空时拿它当标题用（和 macOS 便签一样，标题只是首行的别名）。 */
@@ -456,6 +616,98 @@ window.__ModuleLoader__.load({
     const TABLE_LINE = /^\s*\|/
     /** 分隔行 `|---|:--:|`，决定上一行是表头。 */
     const TABLE_DIVIDER = /^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)*\|?\s*$/
+    /** 围栏代码块：``` 或 ~~~，闭合标记必须与开头的字符一致。 */
+    const FENCE_LINE = /^\s*(```|~~~)(.*)$/
+    /** ATX 标题：`#` 到 `######`，后面必须有空格。 */
+    const HEADING_LINE = /^(#{1,6})\s+(.*)$/
+    /** 列表项：`- ` / `* ` / `+ ` 或 `1. ` / `1) `，前面的缩进决定层级。 */
+    const LIST_LINE = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/
+    /** Markdown 链接：`[文字](url)`，URL 里不允许空白与右括号。 */
+    const MD_LINK = /\[[^\]\n]*\]\(\s*([^)\s]+)\s*\)/g
+    /** 外链只认 http(s) 与 mailto，别的协议（javascript:/data:/file:）一律当普通文本。 */
+    const EXTERNAL_HREF = /^(?:https?:\/\/|mailto:)/i
+    // 首字符不能是点（`assets/.` 会被 URL 规范化成插件根），也限个长度。
+    const ASSET_NAME = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$/
+
+    /**
+     * 站内图片链接白名单：必须是 `assets/` 下一层、不含 `..`、不含额外斜杠。
+     * 少了这道判定，`assets/../../api/...` 会被 `new URL` 规范化成别的路由。
+     */
+    function isAssetHref(href) {
+      if (typeof href !== 'string' || !href.startsWith('assets/')) return false
+      const name = href.slice(7)
+      return name !== '' && !name.includes('..') && !name.includes('/') && ASSET_NAME.test(name)
+    }
+
+    /**
+     * 行内标记：**粗体** / *斜体* / `代码` / [文字](url)。
+     * 返回纯对象片段（不含 React），渲染交给调用方；`dsn:body` 区块因此保持可整块求值。
+     */
+    function inlineOf(text) {
+      const source = String(text == null ? '' : text)
+      const parts = []
+      let buffer = ''
+      let index = 0
+      const flushText = () => {
+        if (buffer === '') return
+        parts.push({ type: 'text', text: buffer })
+        buffer = ''
+      }
+      while (index < source.length) {
+        const char = source[index]
+        // 行内代码优先级最高：里面的 ** 和 [] 都是字面量。
+        if (char === '`') {
+          const end = source.indexOf('`', index + 1)
+          if (end > index + 1) {
+            flushText()
+            parts.push({ type: 'code', text: source.slice(index + 1, end) })
+            index = end + 1
+            continue
+          }
+        }
+        if (char === '[') {
+          const close = source.indexOf(']', index + 1)
+          if (close > index && source[close + 1] === '(') {
+            const end = source.indexOf(')', close + 2)
+            if (end > close + 2) {
+              const label = source.slice(index + 1, close)
+              const href = source.slice(close + 2, end).trim()
+              // 只认外链、mailto 与站内 assets，避免把任意协议或越界路径塞进 href。
+              if (label !== '' && (EXTERNAL_HREF.test(href) || isAssetHref(href))) {
+                flushText()
+                parts.push({ type: 'link', text: label, href })
+                index = end + 1
+                continue
+              }
+            }
+          }
+        }
+        if ((char === '*' && source[index + 1] === '*') || (char === '_' && source[index + 1] === '_')) {
+          const marker = source.slice(index, index + 2)
+          const end = source.indexOf(marker, index + 2)
+          if (end > index + 2) {
+            flushText()
+            parts.push({ type: 'strong', text: source.slice(index + 2, end) })
+            index = end + 2
+            continue
+          }
+        }
+        // 单个 * 才是斜体；不处理 _斜体_，否则 snake_case 和文件名会被吃掉。
+        if (char === '*') {
+          const end = source.indexOf('*', index + 1)
+          if (end > index + 1) {
+            flushText()
+            parts.push({ type: 'em', text: source.slice(index + 1, end) })
+            index = end + 1
+            continue
+          }
+        }
+        buffer += char
+        index += 1
+      }
+      flushText()
+      return parts
+    }
 
     /** 拆一行：处理 `\|` 转义与首尾竖线。 */
     function splitRow(line) {
@@ -555,11 +807,11 @@ window.__ModuleLoader__.load({
     }
 
     /** 整行只有一个图片引用时，预览里由底部缩略图代表，正文行不再重复显示。 */
-    const IMAGE_LINE = /^\s*!\[[^\]]*\]\(\s*assets\/[A-Za-z0-9._-]+\s*\)\s*$/
+    const IMAGE_LINE = /^\s*!\[[^\]]*\]\(\s*assets\/([A-Za-z0-9._-]+)\s*\)\s*$/
 
     /**
-     * 预览态把正文切成块：表格整块、待办逐行、其余行按段落合并（图片行隐藏）。
-     * 每块记着正文里的字符偏移，点哪一块就能把光标放到那一行。
+     * 预览态把正文切成块：代码块 / 表格整块、标题与待办逐行、列表整段、
+     * 其余行按段落合并（图片行隐藏）。每块记着正文里的字符偏移，点哪一块就把光标放到那一行。
      */
     function blocksOf(body) {
       const lines = String(body || '').split('\n')
@@ -589,6 +841,43 @@ window.__ModuleLoader__.load({
           continue
         }
         const line = lines[index]
+
+        // 代码块：整段吃掉，里面的表格和列表都不再解析。
+        const fence = FENCE_LINE.exec(line)
+        if (fence) {
+          flush()
+          const marker = fence[1]
+          const codeLines = []
+          let cursor = index + 1
+          while (cursor < lines.length) {
+            const closing = FENCE_LINE.exec(lines[cursor])
+            if (closing && closing[1] === marker) break
+            codeLines.push(lines[cursor])
+            cursor += 1
+          }
+          blocks.push({
+            type: 'code',
+            offset: offsets[index],
+            lang: fence[2].trim(),
+            text: codeLines.join('\n'),
+          })
+          index = cursor < lines.length ? cursor + 1 : cursor
+          continue
+        }
+
+        const heading = HEADING_LINE.exec(line)
+        if (heading) {
+          flush()
+          blocks.push({
+            type: 'heading',
+            offset: offsets[index],
+            level: heading[1].length,
+            text: heading[2].trim(),
+          })
+          index += 1
+          continue
+        }
+
         const todo = TODO_PATTERN.exec(line)
         if (todo) {
           flush()
@@ -602,11 +891,35 @@ window.__ModuleLoader__.load({
           index += 1
           continue
         }
-        if (line.trim() === '' || IMAGE_LINE.test(line)) {
+
+        const imageLine = IMAGE_LINE.exec(line)
+        // 图片行让位给底部缩略图；但路径不合法的（`assets/..` 之类）要当普通文本显示出来，
+        // 否则既不出图也不出字，内容等于凭空消失。
+        if (line.trim() === '' || (imageLine !== null && isAssetHref(`assets/${imageLine[1]}`))) {
           flush()
           index += 1
           continue
         }
+
+        // 列表：连续同类型（有序/无序）的项合成一段，缩进存下来交给渲染层做层级。
+        const item = LIST_LINE.exec(line)
+        if (item) {
+          flush()
+          const ordered = /\d/.test(item[2])
+          const items = []
+          let cursor = index
+          while (cursor < lines.length) {
+            if (TODO_PATTERN.test(lines[cursor])) break
+            const next = LIST_LINE.exec(lines[cursor])
+            if (!next || /\d/.test(next[2]) !== ordered) break
+            items.push({ offset: offsets[cursor], indent: next[1].length, text: next[3] })
+            cursor += 1
+          }
+          blocks.push({ type: 'list', offset: offsets[index], ordered, items })
+          index = cursor
+          continue
+        }
+
         if (!paragraph) paragraph = { type: 'text', offset: offsets[index], lines: [] }
         paragraph.lines.push(line)
         index += 1
@@ -645,18 +958,24 @@ window.__ModuleLoader__.load({
       const found = []
       const pattern = /!\[[^\]]*\]\(\s*(assets\/[A-Za-z0-9._-]+)\s*\)/g
       for (const match of String(body || '').matchAll(pattern)) {
+        // 和正文链接用同一套判定：`assets/..` 之类不进 <img src>。
+        if (!isAssetHref(match[1])) continue
         if (!found.includes(match[1])) found.push(match[1])
         if (found.length >= 3) break
       }
       return found
     }
 
-    /** 正文里的外链，做成可点的小胶囊。 */
+    /** 正文里的外链，做成可点的小胶囊；`[文字](url)` 里的 URL 归正文链接，不重复出胶囊。 */
     function linksOf(body) {
       const found = []
+      const text = String(body || '')
+      const explicit = new Set()
+      for (const match of text.matchAll(MD_LINK)) explicit.add(match[1])
       const pattern = /\bhttps?:\/\/[^\s<>"'）】]+/g
-      for (const match of String(body || '').matchAll(pattern)) {
+      for (const match of text.matchAll(pattern)) {
         const url = match[0].replace(/[.,;!?]+$/, '')
+        if (explicit.has(url)) continue
         if (!found.includes(url)) found.push(url)
         if (found.length >= 3) break
       }
@@ -1018,7 +1337,31 @@ window.__ModuleLoader__.load({
         )
       }
 
-      /** 预览态一块：表格 / 待办 / 文本段落，都带着自己在正文里的偏移。 */
+      /** 行内 Markdown → React 节点；纯文本片段直接返回字符串，React 不会为它要 key。 */
+      const inlineNodes = (text) =>
+        inlineOf(text).map((part, index) => {
+          if (part.type === 'strong') return h('strong', { key: index }, part.text)
+          if (part.type === 'em') return h('em', { key: index }, part.text)
+          if (part.type === 'code') return h('code', { key: index, className: 'dsn-inline-code' }, part.text)
+          if (part.type === 'link') {
+            const internal = isAssetHref(part.href)
+            const href = internal ? resolveApiUrl(`${API_PREFIX}/${part.href}`) : part.href
+            return h(
+              'a',
+              {
+                key: index,
+                className: 'dsn-md-link',
+                href,
+                target: internal ? undefined : '_blank',
+                rel: internal ? undefined : 'noreferrer noopener',
+              },
+              part.text,
+            )
+          }
+          return part.text
+        })
+
+      /** 预览态一块：代码块 / 表格 / 标题 / 待办 / 列表 / 文本段落，都带着自己在正文里的偏移。 */
       const renderBlock = (block) => {
         if (block.type === 'table') {
           return h(
@@ -1051,10 +1394,46 @@ window.__ModuleLoader__.load({
             h('span', { className: 'dsn-todo-text', 'data-done': block.done ? 'true' : 'false' }, block.text || '—'),
           )
         }
+        if (block.type === 'heading') {
+          return h(
+            'div',
+            {
+              key: `heading-${block.offset}`,
+              className: 'dsn-preview-heading',
+              'data-level': String(block.level),
+              'data-offset': block.offset,
+            },
+            inlineNodes(block.text),
+          )
+        }
+        if (block.type === 'code') {
+          return h(
+            'pre',
+            { key: `code-${block.offset}`, className: 'dsn-preview-code', 'data-offset': block.offset },
+            h('code', null, block.text),
+          )
+        }
+        if (block.type === 'list') {
+          return h(
+            block.ordered ? 'ol' : 'ul',
+            { key: `list-${block.offset}`, className: 'dsn-preview-list', 'data-offset': block.offset },
+            block.items.map((item, itemIndex) =>
+              h(
+                'li',
+                {
+                  key: itemIndex,
+                  // 每级缩进按 6px 递进，最多 8 级，避免深层列表把内容挤出去。
+                  style: item.indent > 0 ? { paddingLeft: `${Math.min(item.indent, 8) * 6}px` } : undefined,
+                },
+                inlineNodes(item.text),
+              ),
+            ),
+          )
+        }
         return h(
           'div',
           { key: `text-${block.offset}`, className: 'dsn-preview-text', 'data-offset': block.offset },
-          block.lines.join('\n'),
+          inlineNodes(block.lines.join('\n')),
         )
       }
 
@@ -1087,12 +1466,24 @@ window.__ModuleLoader__.load({
           },
           onDragOver: (event) => {
             event.preventDefault()
+            const types = event.dataTransfer && event.dataTransfer.types ? Array.from(event.dataTransfer.types) : []
+            if (types.indexOf('Files') >= 0) {
+              // 拖进来的是文件：只接受图片，光标显示「复制」，不参与排序。
+              if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+              return
+            }
             const rect = event.currentTarget.getBoundingClientRect()
             // 指针越过卡片中线才插到右边，否则插到左边 —— 前后都能拖。
             props.onDragOver(note.id, event.clientX > rect.left + rect.width / 2 ? 'after' : 'before')
           },
           onDrop: (event) => {
             event.preventDefault()
+            const dropped = event.dataTransfer && event.dataTransfer.files ? Array.from(event.dataTransfer.files) : []
+            const image = dropped.find((file) => file && String(file.type).indexOf('image/') === 0)
+            if (image) {
+              props.onPasteImage(note.id, image)
+              return
+            }
             // 来源 id 优先从 dataTransfer 读：拖拽期间卡片会重渲染，ref 里的 id 可能已经清掉。
             const source = event.dataTransfer ? event.dataTransfer.getData('text/plain') : ''
             props.onDrop(note.id, source)
@@ -1291,7 +1682,7 @@ window.__ModuleLoader__.load({
     })
 
     function NotesPage(props) {
-      const t = props && typeof props.t === 'function' ? props.t : (key) => key
+      const t = props.t
       const tRef = useRef(t)
       tRef.current = t
 
@@ -1325,6 +1716,12 @@ window.__ModuleLoader__.load({
       const [trashMessage, setTrashMessage] = useState(null)
       /** 「清空回收站」需要点两次，避免手滑把 30 天的退路一次性抹掉。 */
       const [trashConfirmAll, setTrashConfirmAll] = useState(false)
+      /** 「数据与备份」弹窗：快照历史 / 导入导出 / 图片占用三段共用一个弹窗。 */
+      const [dataOpen, setDataOpen] = useState(false)
+      const [dataBusy, setDataBusy] = useState(false)
+      const [dataMessage, setDataMessage] = useState(null)
+      const [snapshots, setSnapshots] = useState([])
+      const [assetReport, setAssetReport] = useState(null)
 
       const panelRef = useRef(null)
       const boardRef = useRef(null)
@@ -1351,6 +1748,8 @@ window.__ModuleLoader__.load({
       const retryCountRef = useRef(0)
       const undoTimerRef = useRef(null)
       const aliveRef = useRef(true)
+      /** 隐藏的文件选择框，「导入…」按钮代它点一下。 */
+      const importRef = useRef(null)
 
       /** 串行发送待提交改动；版本冲突时并入服务端状态再重发。 */
       const flush = useCallback(async () => {
@@ -1391,7 +1790,25 @@ window.__ModuleLoader__.load({
           }
           return {}
         }
-        /** 服务端现状 + 本端还没发出去的改动 = 合并结果。 */
+        /**
+         * 字段级合并：只把本端这次真正改过的字段盖到服务端版本上。
+         * 没有字段信息（新建、拖拽排序、撤销删除）才整条以本端为准。
+         */
+        const mergePending = (remote, op) => {
+          const local = op.note
+          const fields = Array.isArray(op.fields) ? op.fields : null
+          if (fields === null) return local
+          const merged = Object.assign({}, remote)
+          for (const field of fields) {
+            if (field in local) merged[field] = local[field]
+          }
+          merged.id = remote.id
+          merged.createdAt = remote.createdAt
+          merged.updatedAt = Math.max(Number(remote.updatedAt) || 0, Number(local.updatedAt) || 0)
+          return merged
+        }
+
+        /** 服务端现状 + 本端还没发出去的改动 = 合并结果（字段级，避免整条吃掉对手的编辑）。 */
         const adopt = (doc) => {
           if (!doc || !Array.isArray(doc.notes)) return
           if (Number.isFinite(doc.version)) versionRef.current = doc.version
@@ -1400,11 +1817,17 @@ window.__ModuleLoader__.load({
           for (const note of doc.notes) {
             const op = pending.get(note.id)
             if (op && op.type === 'delete') continue
-            merged.push(op && op.type === 'save' ? op.note : note)
+            merged.push(op && op.type === 'save' ? mergePending(note, op) : note)
           }
           for (const [id, op] of pending) {
             if (op.type !== 'save') continue
             if (!merged.some((note) => note.id === id)) merged.unshift(op.note)
+          }
+          // 重发前把待发送内容也换成合并结果，否则下一轮又会拿旧字段盖回去。
+          for (const [id, op] of pending) {
+            if (op.type !== 'save' || !Array.isArray(op.fields)) continue
+            const next = merged.find((note) => note.id === id)
+            if (next) pending.set(id, { type: 'save', note: next, fields: op.fields })
           }
           notesRef.current = merged
           setNotes(merged)
@@ -1470,8 +1893,18 @@ window.__ModuleLoader__.load({
       const flushRef = useRef(null)
       flushRef.current = flush
 
-      /** 登记一条改动并防抖发送。 */
-      const schedule = useCallback((id, op) => {
+      /** 登记一条改动并防抖发送；连着改多个字段时把字段集并起来，冲突合并才不会漏。 */
+      const schedule = useCallback((id, next) => {
+        const previous = pendingRef.current.get(id)
+        let op = next
+        if (op.type === 'save' && previous && previous.type === 'save') {
+          if (!Array.isArray(previous.fields) || !Array.isArray(op.fields)) {
+            // 任意一边是「整条」（新建 / 排序 / 撤销删除），就继续按整条发。
+            op = { type: 'save', note: op.note, fields: null }
+          } else {
+            op = { type: 'save', note: op.note, fields: [...new Set([...previous.fields, ...op.fields])] }
+          }
+        }
         pendingRef.current.set(id, op)
         if (aliveRef.current) setStatus('pending')
         if (timerRef.current) clearTimeout(timerRef.current)
@@ -1569,6 +2002,9 @@ window.__ModuleLoader__.load({
           setStatus('idle')
           setErrorText('')
           if (data.recovered) setNotice({ text: tRef.current('recovered'), detail: data.backup || '' })
+          else if (Number(data.dropped) > 0) {
+            setNotice({ text: `${tRef.current('notesDropped')}: ${Number(data.dropped)}`, detail: '' })
+          }
         } catch (caught) {
           if (!aliveRef.current) return
           setLoaded(true)
@@ -1755,6 +2191,222 @@ window.__ModuleLoader__.load({
         [fetchTrash, load],
       )
 
+      /** 拉快照列表：只读元信息，正文由 Host 端在恢复时才读。 */
+      const fetchSnapshots = useCallback(async () => {
+        const response = await fetch(resolveApiUrl(SNAPSHOTS_PATH), {
+          headers: { accept: 'application/json' },
+          cache: 'no-store',
+        })
+        const payload = await response.json().catch(() => null)
+        if (!response.ok || !payload || payload.ok !== true) {
+          throw new Error((payload && payload.error) || `HTTP ${response.status}`)
+        }
+        const list = payload.data && Array.isArray(payload.data.snapshots) ? payload.data.snapshots : []
+        setSnapshots(list)
+      }, [])
+
+      /** 拉图片占用报告：总数 / 大小 / 孤儿 / 断链。 */
+      const fetchAssets = useCallback(async () => {
+        const response = await fetch(resolveApiUrl(STORAGE_PATH), {
+          headers: { accept: 'application/json' },
+          cache: 'no-store',
+        })
+        const payload = await response.json().catch(() => null)
+        if (!response.ok || !payload || payload.ok !== true) {
+          throw new Error((payload && payload.error) || `HTTP ${response.status}`)
+        }
+        setAssetReport(payload.data && typeof payload.data === 'object' ? payload.data : null)
+      }, [])
+
+      const openData = useCallback(async () => {
+        setDataOpen(true)
+        setDataMessage(null)
+        setDataBusy(true)
+        try {
+          await Promise.all([fetchSnapshots(), fetchAssets()])
+        } catch (caught) {
+          setDataMessage({
+            text: `${tRef.current('dataFailed')}：${String((caught && caught.message) || caught)}`,
+            error: true,
+          })
+        } finally {
+          setDataBusy(false)
+        }
+      }, [fetchAssets, fetchSnapshots])
+
+      /** 恢复快照：会整份替换便签，先把待保存改动落盘再让 Host 动手。 */
+      const restoreSnapshot = useCallback(
+        async (name) => {
+          setDataBusy(true)
+          setDataMessage(null)
+          try {
+            await flushRef.current()
+            if (pendingRef.current.size > 0) throw new Error(tRef.current('storagePending'))
+            const response = await fetch(resolveApiUrl(`${SNAPSHOTS_PATH}/${encodeURIComponent(name)}/restore`), {
+              method: 'POST',
+              headers: { 'content-type': 'application/json', [MARKER_HEADER]: '1' },
+              body: '{}',
+            })
+            const payload = await response.json().catch(() => null)
+            if (!response.ok || !payload || payload.ok !== true) {
+              throw new Error((payload && payload.error) || `HTTP ${response.status}`)
+            }
+            await load()
+            await Promise.all([fetchSnapshots(), fetchAssets()])
+            setDataMessage({ text: `${tRef.current('snapshotRestored')}: ${name}`, error: false })
+          } catch (caught) {
+            setDataMessage({
+              text: `${tRef.current('dataFailed')}：${String((caught && caught.message) || caught)}`,
+              error: true,
+            })
+          } finally {
+            setDataBusy(false)
+          }
+        },
+        [fetchAssets, fetchSnapshots, load],
+      )
+
+      /** 导出：JSON 走响应体，Markdown 走二进制（带图片时是 zip）。 */
+      const exportData = useCallback(async (format) => {
+        setDataBusy(true)
+        setDataMessage(null)
+        try {
+          // 导出读的是磁盘，先把防抖中的改动落盘，导出的才是眼前这一份。
+          await flushRef.current()
+          const response = await fetch(resolveApiUrl(`${EXPORT_PATH}?format=${format}&assets=1`), {
+            headers: { accept: '*/*' },
+            cache: 'no-store',
+          })
+          if (!response.ok) {
+            const payload = await response.json().catch(() => null)
+            throw new Error((payload && payload.error) || `HTTP ${response.status}`)
+          }
+          if (format === 'json') {
+            const payload = await response.json().catch(() => null)
+            if (!payload || payload.ok !== true) throw new Error((payload && payload.error) || 'export failed')
+            const data = payload.data || {}
+            triggerDownload(
+              new Blob([`${JSON.stringify(data, null, 2)}\n`], { type: 'application/json' }),
+              `sticky-notes-${fileStamp()}.json`,
+            )
+            const stats = data.stats || {}
+            // 导出也可能是「不完整」的：读盘抢救过、或图片超出体积上限被跳过。
+            const dropped = Number(stats.dropped) || 0
+            const flags = []
+            if (dropped > 0) flags.push(`${tRef.current('notesDropped')} ${dropped}`)
+            if (stats.truncated === true) flags.push(tRef.current('exportTruncated'))
+            setDataMessage({
+              text: `${tRef.current('exportDone')}: ${Number(stats.notes) || 0} ${tRef.current('noteUnit')} · ${
+                Number(stats.assets) || 0
+              } ${tRef.current('assetUnit')}${flags.length > 0 ? ` · ${flags.join(' · ')}` : ''}`,
+              error: flags.length > 0,
+            })
+          } else {
+            const blob = await response.blob()
+            triggerDownload(blob, filenameOf(response, `sticky-notes-${fileStamp()}.zip`))
+            setDataMessage({ text: tRef.current('exportDone'), error: false })
+          }
+        } catch (caught) {
+          setDataMessage({
+            text: `${tRef.current('exportFailed')}：${String((caught && caught.message) || caught)}`,
+            error: true,
+          })
+        } finally {
+          setDataBusy(false)
+        }
+      }, [])
+
+      /** 导入 JSON 备份：按 id 合并，更新过的本地便签不会被覆盖。 */
+      const importBackup = useCallback(
+        async (file) => {
+          if (!file) return
+          setDataBusy(true)
+          setDataMessage(null)
+          try {
+            const text = await readTextFile(file)
+            let parsed
+            try {
+              parsed = JSON.parse(text)
+            } catch {
+              throw new Error(tRef.current('importInvalid'))
+            }
+            if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+              throw new Error(tRef.current('importInvalid'))
+            }
+            await flushRef.current()
+            if (pendingRef.current.size > 0) throw new Error(tRef.current('storagePending'))
+            const response = await fetch(resolveApiUrl(IMPORT_PATH), {
+              method: 'POST',
+              headers: { 'content-type': 'application/json', [MARKER_HEADER]: '1' },
+              body: JSON.stringify(Object.assign({}, parsed, { mode: 'merge', baseVersion: versionRef.current })),
+            })
+            if (response.status === 409) throw new Error(tRef.current('importConflict'))
+            const payload = await response.json().catch(() => null)
+            if (!response.ok || !payload || payload.ok !== true) {
+              throw new Error((payload && payload.error) || `HTTP ${response.status}`)
+            }
+            const data = payload.data || {}
+            await load()
+            await Promise.all([fetchSnapshots(), fetchAssets()])
+            const count = `+${Number(data.added) || 0} / ~${Number(data.updated) || 0}`
+            const failed = Number(data.assets && data.assets.failed) || 0
+            const dropped = Number(data.dropped) || 0
+            // 本地满 200 条时新增条目会被拒，条数要单独提示，不然用户以为整份都导进来了。
+            const overflow = Number(data.overflow) || 0
+            const flags = []
+            if (dropped > 0) flags.push(`${tRef.current('notesDropped')} ${dropped}`)
+            if (overflow > 0) flags.push(`${tRef.current('importOverflow')} ${overflow}`)
+            if (failed > 0) flags.push(`${tRef.current('importAssetsFailed')} ${failed}`)
+            setDataMessage({
+              text: `${tRef.current('importDone')}: ${count}${flags.length > 0 ? ` · ${flags.join(' · ')}` : ''}`,
+              error: flags.length > 0,
+            })
+          } catch (caught) {
+            setDataMessage({
+              text: `${tRef.current('importFailed')}：${String((caught && caught.message) || caught)}`,
+              error: true,
+            })
+          } finally {
+            setDataBusy(false)
+            if (importRef.current) importRef.current.value = ''
+          }
+        },
+        [fetchAssets, fetchSnapshots, load],
+      )
+
+      /** 清理孤儿图片：删掉的只是没有任何便签引用的文件。 */
+      const pruneAssets = useCallback(async () => {
+        setDataBusy(true)
+        setDataMessage(null)
+        try {
+          // 先把防抖中的改动落盘：刚粘贴的图片此刻还没写进 notes.json，
+          // 服务端会把它当孤儿删掉，正文就断链了。
+          await flushRef.current()
+          if (pendingRef.current.size > 0) throw new Error(tRef.current('storagePending'))
+          const response = await fetch(resolveApiUrl(STORAGE_PATH), {
+            method: 'DELETE',
+            headers: { [MARKER_HEADER]: '1' },
+          })
+          const payload = await response.json().catch(() => null)
+          if (!response.ok || !payload || payload.ok !== true) {
+            throw new Error((payload && payload.error) || `HTTP ${response.status}`)
+          }
+          const data = payload.data || {}
+          await fetchAssets()
+          setDataMessage({
+            text: `${tRef.current('assetPruned')}: ${Number(data.removed) || 0} · ${formatSize(data.bytes)}`,
+            error: false,
+          })
+        } catch (caught) {
+          setDataMessage({
+            text: `${tRef.current('dataFailed')}：${String((caught && caught.message) || caught)}`,
+            error: true,
+          })
+        } finally {
+          setDataBusy(false)
+        }
+      }, [fetchAssets])
+
       useEffect(() => {
         aliveRef.current = true
         void load()
@@ -1772,14 +2424,16 @@ window.__ModuleLoader__.load({
             clearTimeout(undoTimerRef.current)
             undoTimerRef.current = null
           }
-          // 卸载兜底：逐条发会互相顶着版本号，改成一次整份覆盖（不带 baseVersion，关页面时以本端为准）。
+          // 卸载兜底：逐条发会互相顶着版本号，改成一次整份覆盖。
+          // 带上 baseVersion 是有意为之：期间别的窗口改过就让它 409 掉，
+          // 宁可丢掉本端这几秒的改动，也不能整份盖掉别人的数据。
           if (pendingRef.current.size > 0) {
             try {
               void fetch(resolveApiUrl(API_PATH), {
                 method: 'PUT',
                 keepalive: true,
                 headers: { 'content-type': 'application/json', [MARKER_HEADER]: '1' },
-                body: JSON.stringify({ notes: notesRef.current }),
+                body: JSON.stringify({ notes: notesRef.current, baseVersion: versionRef.current }),
               })
             } catch {
               // 页面已经走了，失败也没处提示。
@@ -1832,17 +2486,18 @@ window.__ModuleLoader__.load({
         }
       }, [menuId])
 
-      // 目录 / 回收站弹窗：Esc 关闭。
+      // 目录 / 回收站 / 数据弹窗：Esc 关闭。
       useEffect(() => {
-        if (!storageOpen && !trashOpen) return undefined
+        if (!storageOpen && !trashOpen && !dataOpen) return undefined
         const onKeyDown = (event) => {
           if (event.key !== 'Escape') return
           setStorageOpen(false)
           setTrashOpen(false)
+          setDataOpen(false)
         }
         document.addEventListener('keydown', onKeyDown)
         return () => document.removeEventListener('keydown', onKeyDown)
-      }, [storageOpen, trashOpen])
+      }, [storageOpen, trashOpen, dataOpen])
 
       // 面板重新可见或窗口聚焦时对齐一次版本号，可见期间再低频兜底轮询。
       useEffect(() => {
@@ -1887,7 +2542,8 @@ window.__ModuleLoader__.load({
         const next = list.slice()
         next[index] = note
         commit(next)
-        schedule(id, { type: 'save', note })
+        // 记下改了哪些字段：撞上 409 时只合并这些，别把对手的改动整条盖掉。
+        schedule(id, { type: 'save', note, fields: Object.keys(patch) })
       }, [commit, schedule])
 
       const clearUndo = useCallback(() => {
@@ -2271,6 +2927,16 @@ window.__ModuleLoader__.load({
               {
                 type: 'button',
                 className: 'dsn-btn',
+                title: t('dataTitle'),
+                onClick: () => void openData(),
+              },
+              t('data'),
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsn-btn',
                 title: t('trashTitle'),
                 onClick: () => void openTrash(),
               },
@@ -2322,6 +2988,12 @@ window.__ModuleLoader__.load({
               ref: boardRef,
               // 兜底：卡片上的 dragover/drop 万一没接住，就在看板层按卡片 id 再算一次。
               onDragOver: (event) => {
+                const types = event.dataTransfer && event.dataTransfer.types ? Array.from(event.dataTransfer.types) : []
+                if (types.indexOf('Files') >= 0) {
+                  // 文件落在空白处没有目标便签，阻止浏览器直接打开它。
+                  event.preventDefault()
+                  return
+                }
                 if (!dragIdRef.current) return
                 const card = event.target && event.target.closest ? event.target.closest('[data-note-id]') : null
                 if (!card) return
@@ -2332,6 +3004,12 @@ window.__ModuleLoader__.load({
                 onDragOverCard(id, event.clientX > rect.left + rect.width / 2 ? 'after' : 'before')
               },
               onDrop: (event) => {
+                // 文件落在空白处没有目标便签：只吃掉默认行为，不新建也不排序。
+                const types = event.dataTransfer && event.dataTransfer.types ? Array.from(event.dataTransfer.types) : []
+                if (types.indexOf('Files') >= 0) {
+                  event.preventDefault()
+                  return
+                }
                 // 卡片已经处理过就不再重复排序。
                 if (event.defaultPrevented) return
                 const card = event.target && event.target.closest ? event.target.closest('[data-note-id]') : null
@@ -2543,6 +3221,200 @@ window.__ModuleLoader__.load({
                         onClick: () => setTrashOpen(false),
                       },
                       t('trashClose'),
+                    ),
+                  ),
+                ),
+              )
+            : null,
+          dataOpen
+            ? h(
+                'div',
+                {
+                  className: 'dsn-modal',
+                  onPointerDown: (event) => {
+                    if (event.target === event.currentTarget) setDataOpen(false)
+                  },
+                },
+                h(
+                  'div',
+                  {
+                    className: 'dsn-modal-card dsn-modal-card--tall',
+                    role: 'dialog',
+                    'aria-modal': 'true',
+                    'aria-label': t('dataTitle'),
+                  },
+                  h('div', { className: 'dsn-modal-title' }, t('dataTitle')),
+                  h(
+                    'div',
+                    { className: 'dsn-section' },
+                    h(
+                      'div',
+                      { className: 'dsn-section-head' },
+                      h('span', { className: 'dsn-section-title' }, t('snapshotSection')),
+                    ),
+                    h('div', { className: 'dsn-hint' }, t('snapshotHint')),
+                    snapshots.length === 0
+                      ? h('div', { className: 'dsn-trash-empty' }, dataBusy ? t('dataBusy') : t('snapshotEmpty'))
+                      : h(
+                          'ul',
+                          { className: 'dsn-list' },
+                          snapshots.map((item) => {
+                            const kindKey = SNAPSHOT_KINDS[item.kind]
+                            return h(
+                              'li',
+                              { className: 'dsn-list-item', key: item.name },
+                              h(
+                                'div',
+                                { className: 'dsn-list-text' },
+                                h(
+                                  'div',
+                                  { className: 'dsn-list-name', title: item.name },
+                                  `${formatTime(item.mtime)} · ${Number(item.notes) || 0} ${t('noteUnit')}`,
+                                ),
+                                h(
+                                  'div',
+                                  { className: 'dsn-list-meta' },
+                                  `${formatSize(item.size)}${item.broken === true ? ` · ${t('snapshotBroken')}` : ''}`,
+                                ),
+                              ),
+                              kindKey ? h('span', { className: 'dsn-tag' }, t(kindKey)) : null,
+                              h(
+                                'button',
+                                {
+                                  type: 'button',
+                                  className: 'dsn-btn',
+                                  disabled: dataBusy || item.broken === true,
+                                  onClick: () => void restoreSnapshot(item.name),
+                                },
+                                t('snapshotRestore'),
+                              ),
+                            )
+                          }),
+                        ),
+                  ),
+                  h(
+                    'div',
+                    { className: 'dsn-section' },
+                    h(
+                      'div',
+                      { className: 'dsn-section-head' },
+                      h('span', { className: 'dsn-section-title' }, t('exportSection')),
+                    ),
+                    h('div', { className: 'dsn-hint' }, t('exportHint')),
+                    h(
+                      'div',
+                      { className: 'dsn-actions' },
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          className: 'dsn-btn',
+                          disabled: dataBusy,
+                          onClick: () => void exportData('json'),
+                        },
+                        t('exportJson'),
+                      ),
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          className: 'dsn-btn',
+                          disabled: dataBusy,
+                          onClick: () => void exportData('markdown'),
+                        },
+                        t('exportMarkdown'),
+                      ),
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          className: 'dsn-btn',
+                          disabled: dataBusy,
+                          onClick: () => {
+                            if (importRef.current) importRef.current.click()
+                          },
+                        },
+                        t('importAction'),
+                      ),
+                    ),
+                    h('div', { className: 'dsn-hint' }, t('importHint')),
+                  ),
+                  h(
+                    'div',
+                    { className: 'dsn-section' },
+                    h(
+                      'div',
+                      { className: 'dsn-section-head' },
+                      h('span', { className: 'dsn-section-title' }, t('assetSection')),
+                    ),
+                    h(
+                      'div',
+                      { className: 'dsn-list-meta' },
+                      assetReport === null
+                        ? '—'
+                        : `${Number(assetReport.total) || 0} ${t('assetUnit')} · ${formatSize(assetReport.bytes)}${
+                            assetReport.orphanCount > 0
+                              ? ` · ${assetReport.orphanCount} ${t('assetOrphan')} (${formatSize(assetReport.orphanBytes)})`
+                              : ` · ${t('assetClean')}`
+                          }${assetReport.recent > 0 ? ` · ${assetReport.recent} ${t('assetRecent')}` : ''}${
+                            assetReport.missingCount > 0
+                              ? ` · ${t('assetMissing')} ${assetReport.missingCount}`
+                              : ''
+                          }`,
+                    ),
+                    h('div', { className: 'dsn-hint' }, t('assetHint')),
+                    h(
+                      'div',
+                      { className: 'dsn-actions' },
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          className:
+                            assetReport && assetReport.orphanCount > 0 ? 'dsn-btn dsn-btn--danger' : 'dsn-btn',
+                          disabled: dataBusy || assetReport === null || !(assetReport.orphanCount > 0),
+                          onClick: () => void pruneAssets(),
+                        },
+                        t('assetPrune'),
+                      ),
+                    ),
+                  ),
+                  dataMessage
+                    ? h(
+                        'div',
+                        {
+                          className: dataMessage.error
+                            ? 'dsn-modal-status dsn-modal-status--error'
+                            : 'dsn-modal-status',
+                          role: 'status',
+                        },
+                        dataMessage.text,
+                      )
+                    : null,
+                  h('input', {
+                    ref: importRef,
+                    className: 'dsn-hidden-input',
+                    type: 'file',
+                    accept: 'application/json,.json',
+                    'aria-label': t('importAction'),
+                    onChange: (event) => {
+                      const file = event.target.files && event.target.files[0]
+                      void importBackup(file)
+                    },
+                  }),
+                  h(
+                    'div',
+                    { className: 'dsn-modal-foot' },
+                    h('span', { className: 'dsn-grow' }),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'dsn-btn',
+                        disabled: dataBusy,
+                        onClick: () => setDataOpen(false),
+                      },
+                      t('dataClose'),
                     ),
                   ),
                 ),

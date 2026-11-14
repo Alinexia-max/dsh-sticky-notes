@@ -1,0 +1,18 @@
+# 插件本身零依赖，node_modules 只会在本地临时试验时出现
+node_modules/
+
+# 数据文件永远不该进仓库：它们该待在 %DSH_HOME%/sticky-notes 里。
+# 这里只挡「把数据目录设在仓库里」时漏出来的那几个文件名。
+notes.json
+notes.bak.*.json
+notes.corrupt-*.json
+notes.migrated-*.json
+notes.pre-restore-*.json
+.notes.lock
+.notes.lock.stale-*
+.notes.*.tmp
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+*.log

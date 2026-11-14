@@ -1,4 +1,6 @@
-// 静态检查客户端半边：loader 契约、i18n key 完整性、主题 token 白名单、注册 id 一致性。
+// 静态检查：loader 契约、i18n key 完整性、主题 token 白名单、注册 id 一致性、
+// 路由/工具面一致性、配色三处同步、正文纯函数（表格/待办/Markdown）整块求值。
+// 视觉与交互仍然只能装进宿主看，清单在 references/verification.md。
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
@@ -9,6 +11,7 @@ const client = await read('client.js')
 const index = await read('index.js')
 const store = await read('store.js')
 const mcp = await read('mcp.js')
+const exporter = await read('export.js')
 const pkg = JSON.parse(await read('package.json'))
 
 const checks = []
@@ -33,11 +36,28 @@ check('panellist id === main key', panelId !== null && client.includes("id: PANE
 
 // 4. i18n：t('x') 用到的 key 在中英文字典里都有
 const used = new Set()
-for (const match of client.matchAll(/\bt\('([a-zA-Z]+)'\)/g)) used.add(match[1])
+// 直接调用与 ref 里的延迟调用都要算；只认 t('x') 会漏掉 tRef.current('x')。
+for (const match of client.matchAll(/(?:\bt|tRef\.current)\('([a-zA-Z]+)'\)/g)) used.add(match[1])
+// 表驱动文案（PAPERS 的 label、SORTS 的 label、SNAPSHOT_KINDS 的取值）也走 t()，一并算进来。
+// `(?<!aria-)` 防止把 aria-label 的字面量误当成 i18n key。
+for (const match of client.matchAll(/(?<!aria-)\b(?:label|auto|preRestore|corrupt|migrated): '([a-zA-Z]+)'/g)) {
+  used.add(match[1])
+}
 const zhStart = client.indexOf('zh: {')
 const enStart = client.indexOf('en: {')
+const cssStart = client.indexOf('const CSS', enStart)
+// 切片锚点一旦改名，下面几条断言会拿空集合互相比较、静默通过，先确认三处都在。
+check('dictionary blocks are locatable', zhStart > 0 && enStart > zhStart && cssStart > enStart, {
+  zhStart,
+  enStart,
+  cssStart,
+})
+if (zhStart < 0 || enStart <= zhStart || cssStart <= enStart) {
+  console.error('\nthe zh/en dictionary blocks could not be sliced — i18n assertions would be meaningless.')
+  process.exit(1)
+}
 const zhBlock = client.slice(zhStart, enStart)
-const enBlock = client.slice(enStart, client.indexOf('const CSS', enStart))
+const enBlock = client.slice(enStart, cssStart)
 const keyOf = (block) => new Set([...block.matchAll(/^\s{8}([a-zA-Z]+):/gm)].map((m) => m[1]))
 const zhKeys = keyOf(zhBlock)
 const enKeys = keyOf(enBlock)
@@ -46,6 +66,9 @@ const missingEn = [...used].filter((key) => !enKeys.has(key))
 check(`zh dictionary covers ${used.size} keys`, missingZh.length === 0, missingZh)
 check(`en dictionary covers ${used.size} keys`, missingEn.length === 0, missingEn)
 check('zh/en key sets match', zhKeys.size === enKeys.size && [...zhKeys].every((key) => enKeys.has(key)), `${zhKeys.size} vs ${enKeys.size}`)
+// 反向检查：字典里留着没人用的 key，说明删功能时忘了删文案。
+const unusedKeys = [...zhKeys].filter((key) => !used.has(key))
+check('no unused dictionary keys', unusedKeys.length === 0, unusedKeys)
 
 // 5. 主题 token 必须来自 Theme.listTokens，不许自造
 const allowed = new Set([
@@ -107,8 +130,6 @@ check('no dangerouslySetInnerHTML', !/dangerouslySetInnerHTML/.test(client))
 check('inputs capped by maxLength', /maxLength: MAX_TITLE/.test(client) && /maxLength: MAX_NOTE_BODY/.test(client))
 
 // 10. dsh 清单齐备
-
-// 9. dsh 清单齐备
 check('dsh.bundle.patch declared', pkg.dsh?.bundle?.patch === './cordis.patch.yml')
 check('dsh.client.platform web', pkg.dsh?.client?.platform === 'web')
 check('package exports ./client', Boolean(pkg.exports?.['./client']))
@@ -122,17 +143,42 @@ const externalImports = (source) =>
 check('store.js imports only node builtins', externalImports(store).length === 0, externalImports(store))
 check('mcp.js imports only node builtins and local files', externalImports(mcp).length === 0, externalImports(mcp))
 check('index.js imports only node builtins and local files', externalImports(index).length === 0, externalImports(index))
+check('export.js imports only node builtins and local files', externalImports(exporter).length === 0, externalImports(exporter))
+check(
+  'asset size cap is defined once in store.js',
+  store.includes('const MAX_ASSET_BYTES = 8 * 1024 * 1024') &&
+    !/const MAX_ASSET_BYTES/.test(index) &&
+    !/const MAX_ASSET_BYTES/.test(exporter),
+  'duplicated asset size cap',
+)
 
 // 12. 分发清单与包入口
 check('files ship store.js and mcp.js', ['store.js', 'mcp.js'].every((name) => pkg.files?.includes(name)), pkg.files)
 check('package exports ./mcp', pkg.exports?.['./mcp'] === './mcp.js', pkg.exports?.['./mcp'])
 
 // 13. 三条入口共享同一套工具面：MCP server + DSH 原生工具 + 后台对齐
-const toolNames = ['notes_list', 'notes_get', 'notes_create', 'notes_update', 'notes_delete', 'notes_restore', 'notes_purge']
+const toolNames = [
+  'notes_list',
+  'notes_get',
+  'notes_create',
+  'notes_update',
+  'notes_delete',
+  'notes_restore',
+  'notes_purge',
+  'notes_trash_list',
+  'notes_empty_trash',
+]
 check(
   'mcp server exposes every note tool',
   toolNames.every((toolName) => mcp.includes(`name: '${toolName}'`)),
   toolNames.filter((toolName) => !mcp.includes(`name: '${toolName}'`)),
+)
+// 手工维护的名字清单最容易漂移（之前就漏过两个），所以直接跟 mcp.js 里的定义对账。
+const mcpToolNames = [...mcp.matchAll(/name: '(notes_[a-z_]+)'/g)].map((match) => match[1])
+check(
+  'tool surface has no drift',
+  mcpToolNames.length === toolNames.length && mcpToolNames.every((name) => toolNames.includes(name)),
+  `mcp.js defines ${mcpToolNames.length}: ${mcpToolNames.join(',')}`,
 )
 check(
   'host registers the native note tools',
@@ -156,9 +202,17 @@ const bodyBegin = client.indexOf('/* dsn:body:begin')
 const bodyEnd = client.indexOf('/* dsn:body:end */')
 const bodyBlock = bodyBegin >= 0 && bodyEnd > bodyBegin ? client.slice(client.indexOf('\n', bodyBegin), bodyEnd) : ''
 const tables = bodyBlock
-  ? new Function(bodyBlock + '\nreturn { tablesOf, setTableCell, tableFromTsv, appendTable, blocksOf, orderForDrop };')()
+  ? new Function(
+      bodyBlock + '\nreturn { tablesOf, setTableCell, tableFromTsv, appendTable, blocksOf, orderForDrop, inlineOf };',
+    )()
   : null
 check('body helpers are evaluable', Boolean(tables), 'missing dsn:body block')
+if (!tables) {
+  // 切片失败时下面二十多条断言会整体跳过，CI 只会看到一条失败、很容易被当成注释笔误。
+  // 直接终止，避免"以为测过其实没测"。
+  console.error('\ndsn:body block not found — the markdown assertions did not run at all.')
+  process.exit(1)
+}
 if (tables) {
   const md = ['| 名称 | 数量 |', '| --- | --- |', '| 苹果 | 2 |', '| 香蕉 | 3 |'].join('\n')
   const parsed = tables.tablesOf(md)
@@ -259,6 +313,147 @@ if (tables) {
   check('drop into the pinned group lands before it', tables.orderForDrop(mixed, 0, true, valueOf) < -1, tables.orderForDrop(mixed, 0, true, valueOf))
   check('drop at the pinned group tail lands after it', tables.orderForDrop(mixed, 1, true, valueOf) > -1, tables.orderForDrop(mixed, 1, true, valueOf))
 }
+
+// 18. 数据面板：快照 / 导入导出 / 图片回收三条路由与宿主保持一致
+const dataRoutes = ['SNAPSHOTS_PATH', 'EXPORT_PATH', 'IMPORT_PATH', 'STORAGE_PATH']
+check(
+  'client declares the data routes',
+  dataRoutes.every((route) => client.includes(`const ${route} = \`\${API_PREFIX}/`)),
+  dataRoutes.filter((route) => !client.includes(`const ${route} = \`\${API_PREFIX}/`)),
+)
+check(
+  'host serves the data routes',
+  ['handleSnapshots', 'handleSnapshotItem', 'handleExport', 'handleImport', 'handleStorage', 'SNAPSHOT_NAME'].every(
+    (name) => index.includes(name),
+  ),
+  'missing data handler',
+)
+check(
+  'client wires the data dialog',
+  ['openData', 'restoreSnapshot', 'exportData', 'importBackup', 'pruneAssets'].every((name) => client.includes(name)),
+  'missing data ui',
+)
+check(
+  'downloads never touch document.body',
+  client.includes('triggerDownload') && !/document\.body/.test(client),
+  'download helper leaks into body',
+)
+check(
+  'import merges behind a version guard',
+  client.includes('baseVersion: versionRef.current') && index.includes('MAX_IMPORT_BYTES'),
+  'import without a version guard',
+)
+// 满员导入会被拒掉一部分，条数必须在提示里出现，否则用户以为整份都进来了。
+check(
+  'import reports the overflow count',
+  /data\.overflow[\s\S]{0,300}?importOverflow/.test(client),
+  'overflow not surfaced in the import notice',
+)
+check(
+  'export and storage share the zero-dependency layer',
+  store.includes('restoreSnapshot') && store.includes('listSnapshots') && /from '\.\/export\.js'/.test(index),
+  'missing snapshot/export layer',
+)
+
+// 19. Markdown 补全：行内粗体/斜体/代码/链接，块级标题/代码块/列表
+if (tables) {
+  const strong = tables.inlineOf('前 **粗体** 后')
+  check('inline strong splits text', strong.length === 3 && strong[1].type === 'strong' && strong[1].text === '粗体', strong)
+  const emphasis = tables.inlineOf('a *斜* b')
+  check('inline emphasis', emphasis[1]?.type === 'em' && emphasis[1].text === '斜', emphasis)
+  const code = tables.inlineOf('`**not bold**`')
+  check(
+    'inline code wins over bold',
+    code.length === 1 && code[0].type === 'code' && code[0].text === '**not bold**',
+    code,
+  )
+  const link = tables.inlineOf('见 [文档](https://example.com/a)')
+  check(
+    'inline link keeps href',
+    link.some((part) => part.type === 'link' && part.href === 'https://example.com/a'),
+    link,
+  )
+  const unsafe = tables.inlineOf('[x](javascript:alert(1))')
+  check('inline link rejects javascript:', unsafe.every((part) => part.type !== 'link'), unsafe)
+  check('snake_case stays literal', tables.inlineOf('a_b_c').length === 1, tables.inlineOf('a_b_c'))
+
+  const md = ['# 标题', '', '- 一项', '- 二项', '', '```js', '| a | b |', '| --- | --- |', '```', '', '正文'].join('\n')
+  const rich = tables.blocksOf(md)
+  check(
+    'blocks: heading / list / code / text',
+    rich.length === 4 &&
+      rich[0].type === 'heading' &&
+      rich[0].level === 1 &&
+      rich[1].type === 'list' &&
+      rich[1].items.length === 2 &&
+      rich[2].type === 'code' &&
+      rich[2].lang === 'js' &&
+      rich[3].type === 'text',
+    rich.map((block) => block.type).join(','),
+  )
+  check('code block swallows pipe tables', rich[2] && rich[2].text.startsWith('| a | b |'), rich[2] && rich[2].text)
+  check('code block offset points at the fence', md.slice(rich[2].offset).startsWith('```js'), rich[2].offset)
+  const ordered = tables.blocksOf('1. 一\n2. 二')
+  check(
+    'ordered list keeps the order flag',
+    ordered.length === 1 && ordered[0].ordered === true && ordered[0].items.length === 2,
+    ordered,
+  )
+  const nested = tables.blocksOf('- 一\n  - 二')
+  check('nested list keeps indent', nested[0].items[1].indent === 2, nested[0].items)
+  check(
+    'todo lines are not swallowed by lists',
+    tables.blocksOf('- [ ] 待办\n- 普通')
+      .map((block) => block.type)
+      .join(',') === 'todo,list',
+    tables.blocksOf('- [ ] 待办\n- 普通').map((block) => block.type),
+  )
+}
+check(
+  'markdown renders through react, not innerHTML',
+  client.includes('inlineNodes') && !/dangerouslySetInnerHTML/.test(client),
+  'markdown bypassed react',
+)
+check('markdown links are not repeated as chips', client.includes('explicit.has(url)'), 'link chips duplicated')
+
+// 20. 图片可以直接拖进卡片
+check(
+  'cards accept dropped images',
+  client.includes("indexOf('Files')") && client.includes('const image = dropped.find'),
+  'no drop-to-upload path',
+)
+
+// 21. 本轮修复的回归防护
+check(
+  'read path salvages instead of renaming',
+  store.includes('function salvageNotes') && !/notes: sanitizeNotes\(parsed\)/.test(store),
+  'readDoc rejects the whole file on field errors',
+)
+check(
+  'note ids are charset-checked',
+  /!ID_PATTERN\.test\(rawId\)/.test(store),
+  'sanitizeNote accepts arbitrary ids',
+)
+check(
+  'import writes images only after the version check',
+  /return \{ conflict: doc \}[\s\S]{0,80}await writeAssets\(/.test(exporter),
+  'assets written before baseVersion is validated',
+)
+check(
+  'asset pruning flushes pending edits first',
+  /const pruneAssets[\s\S]{0,500}flushRef\.current\(\)/.test(client),
+  'prune may delete images whose reference is still pending',
+)
+check(
+  'asset links are path-checked',
+  client.includes('function isAssetHref') && client.includes("!name.includes('..')"),
+  'markdown asset links can walk out of the plugin prefix',
+)
+check(
+  'storage report hides the orphan detail list',
+  index.includes('delete report.orphans'),
+  'orphan detail list is shipped to the browser',
+)
 
 const failed = checks.filter((item) => !item.ok)
 console.log(`\n${checks.length - failed.length}/${checks.length} passed`)

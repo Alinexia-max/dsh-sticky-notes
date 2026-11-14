@@ -5,9 +5,11 @@ import { join } from 'node:path'
 import {
   ASSET_PATTERN,
   ID_PATTERN,
+  MAX_ASSET_BYTES,
   MAX_NOTES,
   MAX_TRASH,
   PAPER_IDS,
+  SNAPSHOT_NAME,
   assetsDir,
   coded,
   createNote,
@@ -16,6 +18,7 @@ import {
   emptyTrash,
   getNote,
   listNotes,
+  listSnapshots,
   listTrash,
   messageOf,
   migrateData,
@@ -25,6 +28,7 @@ import {
   readDoc,
   resolveDataDir,
   restoreNote,
+  restoreSnapshot,
   sanitizeNote,
   sanitizeNotes,
   serialized,
@@ -33,6 +37,7 @@ import {
   writeConfigDir,
   writeDoc,
 } from './store.js'
+import { auditAssets, buildJsonExport, buildMarkdownExport, importData, pruneAssets } from './export.js'
 
 /** Cordis 插件的诊断名；与 patch 里的 id 保持一致便于排查。 */
 const name = 'dsh-sticky-notes'
@@ -45,6 +50,10 @@ const CONFIG_PATH = `${API_PREFIX}/config`
 const NOTES_PATH = `${API_PREFIX}/notes`
 const TRASH_PATH = `${API_PREFIX}/trash`
 const ASSETS_PATH = `${API_PREFIX}/assets`
+const SNAPSHOTS_PATH = `${API_PREFIX}/snapshots`
+const EXPORT_PATH = `${API_PREFIX}/export`
+const IMPORT_PATH = `${API_PREFIX}/import`
+const STORAGE_PATH = `${API_PREFIX}/storage`
 /** 写请求必须带的自定义头：跨站 fetch 因此被迫走预检，而本路由不回 CORS。 */
 const CLIENT_MARKER_HEADER = 'x-dsh-sticky-notes'
 /**
@@ -53,7 +62,11 @@ const CLIENT_MARKER_HEADER = 'x-dsh-sticky-notes'
  * 单条接口只按一条计算，远小于这个值。
  */
 const MAX_BODY_BYTES = 16 * 1024 * 1024
-const MAX_ASSET_BYTES = 8 * 1024 * 1024
+/**
+ * 导入备份的请求体上限：整份便签（12MB）之外还要装 base64 图片（48MB 原始 → 64MB），
+ * 留到 96MB。只有 `/import` 用这个上限，其余写接口仍然按 16MB 卡。
+ */
+const MAX_IMPORT_BYTES = 96 * 1024 * 1024
 const ASSET_TYPES = {
   png: 'image/png',
   jpg: 'image/jpeg',
@@ -91,6 +104,23 @@ function fail(res, caught) {
     ...(caught && typeof caught.code === 'string' ? { code: caught.code } : {}),
     error: messageOf(caught),
   })
+}
+
+/** 二进制响应：导出文件直接带 `content-disposition` 落到用户磁盘。 */
+function binary(res, code, contentType, buffer, filename) {
+  if (!res || res.writableEnded || res.destroyed) return
+  res.once('error', () => undefined)
+  try {
+    res.writeHead(code, {
+      'content-type': contentType,
+      'content-length': buffer.length,
+      'cache-control': 'no-store',
+      'content-disposition': `attachment; filename="${filename}"`,
+    })
+    res.end(buffer)
+  } catch {
+    // 客户端已断开。
+  }
 }
 
 /** 版本号对不上时把服务端现状整份回给客户端，让它自行合并。 */
@@ -272,6 +302,8 @@ async function handleState(req, res, trustedHosts) {
       data.recovered = true
       data.backup = doc.backup || ''
     }
+    // 手工改过 / 旧版本写下的脏条目被丢掉了多少，让界面能提示，别静默消失。
+    if (doc.dropped > 0) data.dropped = doc.dropped
     json(res, 200, { ok: true, data }, req.method === 'HEAD')
     return
   }
@@ -323,7 +355,14 @@ async function handleNote(req, res, rawId, url, trustedHosts) {
       return
     }
     const body = await readBody(req)
-    const note = sanitizeNote(Object.assign({}, body.note || {}, { id }), id)
+    // note 必须是对象：`Object.assign({}, 'x', {id})` 会得到 `{0:'x'}`，
+    // sanitizeNote 照样接受，等于用空标题/空正文把既有便签静默清空。
+    const rawNote = body.note === undefined ? {} : body.note
+    if (rawNote === null || typeof rawNote !== 'object' || Array.isArray(rawNote)) {
+      json(res, 400, { ok: false, code: 'error.proto.invalidNote', error: 'note must be an object' })
+      return
+    }
+    const note = sanitizeNote(Object.assign({}, rawNote, { id }), id)
     const baseVersion = Number.isFinite(body.baseVersion) ? body.baseVersion : null
     const result = await serialized(async () => {
       const doc = await readDoc(filePath)
@@ -551,7 +590,7 @@ async function handleAssetGet(req, res, rawName) {
   if (!res || res.writableEnded || res.destroyed) return
   res.once('error', () => undefined)
   res.writeHead(200, {
-    'content-type': ASSET_TYPES[extension] || 'application/octet-stream',
+    'content-type': ASSET_TYPES[extension],
     'content-length': buffer.length,
     'cache-control': 'private, max-age=31536000, immutable',
   })
@@ -604,6 +643,112 @@ async function handleConfigSet(req, res, trustedHosts) {
     ok: true,
     data: { dir, defaultDir: defaultDataDir(), custom: Boolean(target), ...result },
   })
+}
+
+/** 快照列表：每次写盘前轮转的 notes.bak.N，加上坏文件 / 迁移 / 恢复前留档。 */
+async function handleSnapshots(req, res) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    notAllowed(res, req.method)
+    return
+  }
+  const snapshots = await listSnapshots()
+  json(res, 200, { ok: true, data: { snapshots } }, req.method === 'HEAD')
+}
+
+/** `POST …/snapshots/:name/restore`：恢复前自动把当前状态留一份。 */
+async function handleSnapshotItem(req, res, rawRest, trustedHosts) {
+  const segments = rawRest.split('/')
+  let name
+  try {
+    name = decodeURIComponent(segments[0] || '')
+  } catch {
+    json(res, 400, { ok: false, code: 'error.proto.invalidSnapshot', error: 'invalid snapshot name' })
+    return
+  }
+  if (!SNAPSHOT_NAME.test(name)) {
+    json(res, 400, { ok: false, code: 'error.proto.invalidSnapshot', error: 'invalid snapshot name' })
+    return
+  }
+  if (segments[1] !== 'restore') {
+    json(res, 404, { ok: false, code: 'error.proto.unknownAction', error: 'unknown snapshot action' })
+    return
+  }
+  if (req.method !== 'POST') {
+    notAllowed(res, req.method)
+    return
+  }
+  const requestError = validateMutationRequest(req, trustedHosts)
+  if (requestError !== null) {
+    json(res, requestError.statusCode, { ok: false, code: requestError.code, error: requestError.error })
+    return
+  }
+  await readBody(req)
+  json(res, 200, { ok: true, data: await restoreSnapshot(name) })
+}
+
+/** 导出：`format=json|markdown`，`assets=0` 可跳过图片。 */
+async function handleExport(req, res, url) {
+  if (req.method !== 'GET') {
+    notAllowed(res, req.method)
+    return
+  }
+  const format = url.searchParams.get('format') === 'markdown' ? 'markdown' : 'json'
+  const includeAssets = url.searchParams.get('assets') !== '0'
+  if (format === 'json') {
+    const result = await buildJsonExport({ includeAssets })
+    json(res, 200, { ok: true, data: result.payload })
+    return
+  }
+  const result = await buildMarkdownExport({ includeAssets })
+  binary(res, 200, result.contentType, result.buffer, result.filename)
+}
+
+/** 导入：`merge` 按 id 合并，`replace` 整份替换；图片与便签一起回填。 */
+async function handleImport(req, res, trustedHosts) {
+  if (req.method !== 'POST') {
+    notAllowed(res, req.method)
+    return
+  }
+  const requestError = validateMutationRequest(req, trustedHosts)
+  if (requestError !== null) {
+    json(res, requestError.statusCode, { ok: false, code: requestError.code, error: requestError.error })
+    return
+  }
+  const body = await readBody(req, MAX_IMPORT_BYTES)
+  // 三种常见形状都收：直接拖 notes.json、导出的备份对象、以及包在 data 里的响应体。
+  const payload =
+    Array.isArray(body.notes) ? body : body.data && Array.isArray(body.data.notes) ? body.data : body
+  try {
+    const result = await importData(payload)
+    json(res, 200, { ok: true, data: result })
+  } catch (caught) {
+    if (caught && caught.statusCode === 409 && caught.doc) {
+      conflict(res, caught.doc)
+      return
+    }
+    throw caught
+  }
+}
+
+/** 图片占用：GET 出审计报告，DELETE 清掉没有被引用的图。 */
+async function handleStorage(req, res, trustedHosts) {
+  if (req.method === 'GET' || req.method === 'HEAD') {
+    const report = await auditAssets()
+    // 明细只给 pruneAssets 内部用：一次几百条的孤儿清单没必要发到浏览器。
+    delete report.orphans
+    json(res, 200, { ok: true, data: report }, req.method === 'HEAD')
+    return
+  }
+  if (req.method === 'DELETE') {
+    const markerError = validateMutationMarker(req, trustedHosts)
+    if (markerError !== null) {
+      json(res, markerError.statusCode, { ok: false, code: markerError.code, error: markerError.error })
+      return
+    }
+    json(res, 200, { ok: true, data: await pruneAssets() })
+    return
+  }
+  notAllowed(res, req.method)
 }
 
 /** 工具返回给模型的内容：统一是一段 JSON 文本。 */
@@ -821,11 +966,8 @@ function toolsOf(ctx) {
   } catch {
     // 宿主没挂 dsh-tools。
   }
-  try {
-    return ctx.tools || null
-  } catch {
-    return null
-  }
+  // 属性读取不会抛：插件宿主一定给了 ctx，缺服务就是 undefined。
+  return ctx.tools || null
 }
 
 function apply(ctx) {
@@ -852,6 +994,26 @@ function apply(ctx) {
             if (pathname === CONFIG_PATH) {
               if (req.method === 'GET' || req.method === 'HEAD') await handleConfigGet(req, res)
               else await handleConfigSet(req, res, trustedHosts)
+              return
+            }
+            if (pathname === SNAPSHOTS_PATH) {
+              await handleSnapshots(req, res)
+              return
+            }
+            if (pathname.startsWith(`${SNAPSHOTS_PATH}/`)) {
+              await handleSnapshotItem(req, res, pathname.slice(SNAPSHOTS_PATH.length + 1), trustedHosts)
+              return
+            }
+            if (pathname === EXPORT_PATH) {
+              await handleExport(req, res, url)
+              return
+            }
+            if (pathname === IMPORT_PATH) {
+              await handleImport(req, res, trustedHosts)
+              return
+            }
+            if (pathname === STORAGE_PATH) {
+              await handleStorage(req, res, trustedHosts)
               return
             }
             if (pathname.startsWith(`${NOTES_PATH}/`)) {
@@ -910,4 +1072,4 @@ function apply(ctx) {
   }
 }
 
-export { apply, inject, name, notesTools }
+export { apply, inject, name }

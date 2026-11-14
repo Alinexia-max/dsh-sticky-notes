@@ -1,8 +1,8 @@
 {
   "name": "@local/dsh-sticky-notes",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "Sticky notes inside DeepSeek Harness — a left-sidebar entry with a simple note editor, plus an MCP server. · DSH 侧栏便签（含 MCP）",
+  "description": "Sticky notes inside DeepSeek Harness — a left-sidebar entry with a simple note editor, backups/import/export, plus an MCP server. · DSH 侧栏便签（含 MCP）",
   "type": "module",
   "main": "./index.js",
   "icon": "./icon.svg",
@@ -22,11 +22,13 @@
     "index.js",
     "client.js",
     "store.js",
+    "export.js",
     "mcp.js",
     "cordis.patch.yml",
     "locale",
     "icon.svg",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "dsh": {
     "bundle": {

@@ -8,14 +8,15 @@
  * 因此只允许依赖 node 内置模块：插件保持零运行时依赖，任何一个进程都能直接跑。
  */
 import { randomUUID } from 'node:crypto'
-import { copyFile, mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, open, readdir, readFile, rename, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 
 const MAX_NOTES = 200
 const MAX_TITLE = 200
 const MAX_NOTE_BODY = 20000
-const MAX_ID = 128
+/** 单张图片上限：HTTP 传图（index.js）与导入回填（export.js）共用同一个值。 */
+const MAX_ASSET_BYTES = 8 * 1024 * 1024
 /** 回收站：最多留 30 条、30 天。 */
 const MAX_TRASH = 30
 const TRASH_TTL_MS = 30 * 24 * 60 * 60 * 1000
@@ -180,7 +181,12 @@ function sanitizeNote(raw, fallbackId) {
   const createdAt = Number.isFinite(raw.createdAt) ? raw.createdAt : now
   const updatedAt = Number.isFinite(raw.updatedAt) ? raw.updatedAt : createdAt
   const rawId = typeof raw.id === 'string' && raw.id !== '' ? raw.id : fallbackId
-  const id = typeof rawId === 'string' && rawId !== '' ? rawId.slice(0, MAX_ID) : randomUUID()
+  // id 会被拼进 /notes/:id 与 notes:// 资源 URI，字符集必须收窄。
+  // 旧实现是 slice 截断，那等于悄悄换了身份；这里直接拒绝，由调用方决定丢弃还是报错。
+  if (typeof rawId === 'string' && rawId !== '' && !ID_PATTERN.test(rawId)) {
+    throw coded(400, 'error.proto.invalidId', 'invalid note id')
+  }
+  const id = typeof rawId === 'string' && rawId !== '' ? rawId : randomUUID()
   const color = typeof raw.color === 'string' && PAPER_COLORS.has(raw.color) ? raw.color : ''
   const note = { id, title, body, color, createdAt, updatedAt }
   // 卡片尺寸、手动排序位置与置顶标记都是可选的：老数据没有就当没设置。
@@ -191,12 +197,51 @@ function sanitizeNote(raw, fallbackId) {
   return note
 }
 
-/** 整份覆盖入口（导入/兼容）。 */
+/** 整份覆盖入口（导入/兼容）：严格模式，写请求里出现一条不合法就整体拒绝。 */
 function sanitizeNotes(input) {
   const list = input !== null && typeof input === 'object' && Array.isArray(input.notes) ? input.notes : null
   if (list === null) throw coded(400, 'error.proto.invalidBody', 'notes must be an array')
   if (list.length > MAX_NOTES) throw coded(400, 'error.proto.tooManyNotes', `at most ${MAX_NOTES} notes`)
-  return list.map((raw) => sanitizeNote(raw))
+  const seen = new Set()
+  return list.map((raw) => {
+    const note = sanitizeNote(raw)
+    // 同 id 写两条进去，下一次读盘就得靠 salvageNotes 丢掉一条——不如在入口就说清楚。
+    if (seen.has(note.id)) throw coded(400, 'error.proto.duplicateId', `duplicate note id: ${note.id}`)
+    seen.add(note.id)
+    return note
+  })
+}
+
+/**
+ * 读盘用的宽松清洗：坏条目丢掉、重复 id 去掉、超出上限截断。
+ * 磁盘上的数据可能是手工改过 / 旧版本写的，一条脏数据不该让整份文件被当成「损坏」改名。
+ * 返回丢弃数量，交给上层透出，别静默吞掉。
+ */
+function salvageNotes(input) {
+  const list = input !== null && typeof input === 'object' && Array.isArray(input.notes) ? input.notes : []
+  const notes = []
+  const seen = new Set()
+  let dropped = 0
+  for (const raw of list) {
+    if (notes.length >= MAX_NOTES) {
+      dropped += 1
+      continue
+    }
+    let note
+    try {
+      note = sanitizeNote(raw)
+    } catch {
+      dropped += 1
+      continue
+    }
+    if (seen.has(note.id)) {
+      dropped += 1
+      continue
+    }
+    seen.add(note.id)
+    notes.push(note)
+  }
+  return { notes, dropped }
 }
 
 /** 回收站条目 = 便签本体 + deletedAt；过期和超量的直接丢掉。 */
@@ -238,19 +283,28 @@ async function readDoc(filePath) {
   try {
     raw = await readFile(filePath, 'utf8')
   } catch (caught) {
-    if (caught && caught.code === 'ENOENT') return { version: 0, notes: [], trash: [] }
+    if (caught && caught.code === 'ENOENT') return { version: 0, notes: [], trash: [], dropped: 0 }
     throw caught
   }
+  let parsed
   try {
-    const parsed = JSON.parse(raw)
-    return {
-      version: Number.isFinite(parsed && parsed.version) ? parsed.version : 0,
-      notes: sanitizeNotes(parsed),
-      trash: sanitizeTrash(parsed && parsed.trash),
-    }
+    parsed = JSON.parse(raw)
   } catch {
+    // 只有「根本不是合法 JSON」才算文件损坏：先留档再按空库继续，插件不会永久卡在加载失败。
     const backup = await backupCorrupt(filePath)
-    return { version: 0, notes: [], trash: [], recovered: true, backup }
+    return { version: 0, notes: [], trash: [], recovered: true, backup, dropped: 0 }
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed) || !Array.isArray(parsed.notes)) {
+    const backup = await backupCorrupt(filePath)
+    return { version: 0, notes: [], trash: [], recovered: true, backup, dropped: 0 }
+  }
+  // 结构没问题但字段脏（超量、非法 id、重复、类型不对）时逐条抢救，不动原文件。
+  const salvaged = salvageNotes(parsed)
+  return {
+    version: Number.isFinite(parsed.version) ? parsed.version : 0,
+    notes: salvaged.notes,
+    trash: sanitizeTrash(parsed.trash),
+    dropped: salvaged.dropped,
   }
 }
 
@@ -283,7 +337,18 @@ async function writeDoc(filePath, doc) {
 
 const delay = (ms) => new Promise((done) => setTimeout(done, ms))
 
-/** 锁文件超过这个时间没更新，就认为持有者已经死了。 */
+/** 锁文件的心跳间隔：远小于 LOCK_STALE_MS，长写也不会被别的进程当成「持有者已死」。 */
+const LOCK_HEARTBEAT_MS = 2000
+
+/**
+ * 锁文件的内容就是持有者的 token。
+ * 释放与心跳都靠它确认「这把锁还是我的」——只认 pid 不够，pid 会被复用。
+ */
+function lockToken() {
+  return `${process.pid} ${Date.now()} ${randomUUID()}`
+}
+
+/** 锁文件超过这个时间没心跳，就认为持有者已经死了。 */
 async function isStaleLock(file) {
   try {
     const info = await stat(file)
@@ -293,25 +358,58 @@ async function isStaleLock(file) {
   }
 }
 
+async function readLockToken(file) {
+  try {
+    return (await readFile(file, 'utf8')).trim()
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * 回收陈旧锁。
+ * 直接 `rm` 有窗口：判定陈旧和删除之间，原持有者可能刚好放手、另一个进程又建了新锁，这一 `rm` 就删了别人的锁。
+ * 改用 rename 原子夺取——抢到临时名之后核对内容，对不上说明锁在本轮被重建过，放回去继续排队。
+ */
+async function reclaimStaleLock(file) {
+  if (!(await isStaleLock(file))) return false
+  const before = await readLockToken(file)
+  if (before === '') return false
+  const claim = `${file}.stale-${process.pid}-${Date.now().toString(36)}`
+  try {
+    await rename(file, claim)
+  } catch {
+    // 别人先回收了，或者锁已经消失：回到循环里重新抢。
+    return false
+  }
+  const after = await readLockToken(claim)
+  if (after !== before) {
+    // 期间这把锁被重建过，手里的临时文件是别人的：原样放回，别删。
+    if (await pathExists(file)) await rm(claim, { force: true }).catch(() => undefined)
+    else await rename(claim, file).catch(() => undefined)
+    return false
+  }
+  await rm(claim, { force: true }).catch(() => undefined)
+  return true
+}
+
 async function acquireLock(dir) {
   const file = join(dir, LOCK_NAME)
   await mkdir(dir, { recursive: true })
+  const token = lockToken()
   const deadline = Date.now() + LOCK_TIMEOUT_MS
   for (;;) {
     try {
       const handle = await open(file, 'wx', 0o600)
       try {
-        await handle.writeFile(`${process.pid} ${Date.now()}\n`)
+        await handle.writeFile(`${token}\n`)
       } finally {
         await handle.close()
       }
-      return file
+      return { file, token }
     } catch (caught) {
       if (!caught || caught.code !== 'EEXIST') throw caught
-      if (await isStaleLock(file)) {
-        await rm(file, { force: true })
-        continue
-      }
+      if (await reclaimStaleLock(file)) continue
       if (Date.now() >= deadline) {
         throw coded(503, 'error.state.busy', 'notes storage is locked by another process')
       }
@@ -320,18 +418,38 @@ async function acquireLock(dir) {
   }
 }
 
-async function releaseLock(file) {
-  await rm(file, { force: true })
+/** 心跳：内容还是自己的 token 才刷新 mtime；被人回收了就别再碰。 */
+async function touchLock(lock) {
+  try {
+    if ((await readLockToken(lock.file)) !== lock.token) return
+    const now = new Date()
+    await utimes(lock.file, now, now)
+  } catch {
+    // 目录被搬走 / 文件被删：本轮已经失去锁，交给 acquire 重试。
+  }
+}
+
+/**
+ * 释放：只有内容仍是自己的 token 才删。
+ * 否则说明持有期间这把锁被判过陈旧、已经被别的进程重建，删掉它等于让两个进程同时写。
+ */
+async function releaseLock(lock) {
+  if ((await readLockToken(lock.file)) !== lock.token) return false
+  await rm(lock.file, { force: true }).catch(() => undefined)
+  return true
 }
 
 /**
  * 读-改-写必须串行，分两层：
  * 1. 进程内 Promise 队列，避免本进程的请求互相覆盖；
- * 2. 进程间文件锁，避免面板与 MCP 进程同时写盘。
- * 同一进程内允许重入（持锁期间再调用不会再抢一次锁）。
+ * 2. 进程间文件锁，避免面板与 MCP 进程同时写盘。持锁期间每 2s 刷新一次锁文件 mtime，
+ *    免得一次大导入（几十 MB）被另一个进程当成陈旧锁回收；释放时校验 token，不删别人的锁。
+ *
+ * 注意：这里**不支持重入**。在 `serialized(task)` 的 task 里再调 `serialized()`
+ * 会排在当前任务之后、互相等待而挂死。所以带锁的公开函数（`withDoc` / `restoreSnapshot` /
+ * `pruneAssets` 等）之间不要嵌套调用，内部只调用不加锁的读函数（如 `readState`）。
  */
 let writeQueue = Promise.resolve()
-let lockDepth = 0
 
 function serialized(task) {
   const run = writeQueue.then(
@@ -346,14 +464,15 @@ function serialized(task) {
 }
 
 async function runLocked(task) {
-  if (lockDepth > 0) return task()
-  const lockFile = await acquireLock(await resolveDataDir())
-  lockDepth += 1
+  const lock = await acquireLock(await resolveDataDir())
+  const timer = setInterval(() => void touchLock(lock), LOCK_HEARTBEAT_MS)
+  // 心跳不该把一个空闲进程钉在事件循环里。
+  if (typeof timer.unref === 'function') timer.unref()
   try {
     return await task()
   } finally {
-    lockDepth -= 1
-    await releaseLock(lockFile)
+    clearInterval(timer)
+    await releaseLock(lock)
   }
 }
 
@@ -518,26 +637,145 @@ async function emptyTrash() {
   })
 }
 
+/* ------------------------------------------------------------------ 快照 */
+
+/**
+ * 可回滚的快照文件名：自动轮转 / 坏文件留档 / 迁移留档 / 恢复前留档。
+ * 名字先过这张白名单再拼路径，和 note id、asset 名一个路数。
+ */
+const SNAPSHOT_NAME = /^notes\.(bak\.[1-9]|corrupt-[a-z0-9]+|migrated-[a-z0-9]+|pre-restore-[a-z0-9]+)\.json$/
+/**
+ * 恢复前留档只保留最近一份：rotateSnapshots 已经把同一份内容轮转进 notes.bak.1，
+ * 这里再留一份的意义只是给「恢复前」这个时刻一个可读的语义标签，不需要留多份。
+ */
+const MAX_PRE_RESTORE = 1
+
+function snapshotKindOf(name) {
+  if (name.startsWith('notes.bak.')) return 'auto'
+  if (name.startsWith('notes.corrupt-')) return 'corrupt'
+  if (name.startsWith('notes.migrated-')) return 'migrated'
+  if (name.startsWith('notes.pre-restore-')) return 'preRestore'
+  return ''
+}
+
+/** 列出可回滚的快照：只读元信息与条数，不把整份正文读进内存。 */
+async function listSnapshots() {
+  const dir = await resolveDataDir()
+  let names
+  try {
+    names = await readdir(dir)
+  } catch {
+    return []
+  }
+  const entries = []
+  for (const name of names) {
+    if (!SNAPSHOT_NAME.test(name)) continue
+    const file = join(dir, name)
+    let info
+    try {
+      info = await stat(file)
+    } catch {
+      continue
+    }
+    let notes = 0
+    let broken = false
+    try {
+      const parsed = JSON.parse(await readFile(file, 'utf8'))
+      notes = Array.isArray(parsed && parsed.notes) ? parsed.notes.length : 0
+    } catch {
+      // 留档文件坏了也能列出来，只是不允许恢复。
+      broken = true
+    }
+    entries.push({
+      name,
+      kind: snapshotKindOf(name),
+      size: info.size,
+      mtime: info.mtimeMs,
+      notes,
+      broken,
+    })
+  }
+  return entries.sort((a, b) => b.mtime - a.mtime)
+}
+
+/** 读一份快照的完整内容。 */
+async function readSnapshot(name) {
+  if (typeof name !== 'string' || !SNAPSHOT_NAME.test(name)) {
+    throw coded(400, 'error.proto.invalidSnapshot', 'invalid snapshot name')
+  }
+  const file = join(await resolveDataDir(), name)
+  let raw
+  try {
+    raw = await readFile(file, 'utf8')
+  } catch (caught) {
+    if (caught && caught.code === 'ENOENT') {
+      throw coded(404, 'error.proto.notFound', `snapshot not found: ${name}`)
+    }
+    throw caught
+  }
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw coded(400, 'error.proto.badSnapshot', `snapshot is not valid JSON: ${name}`)
+  }
+  // 结构不对时宁可拒绝，也不要把整板清空——快照是文件，可能被手工改坏。
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed) || !Array.isArray(parsed.notes)) {
+    throw coded(400, 'error.proto.badSnapshot', `snapshot has no notes array: ${name}`)
+  }
+  // 结构没问题但字段脏：坏条目丢掉、超量截断。
+  return { notes: salvageNotes(parsed).notes }
+}
+
+/** 恢复前先给当前 notes.json 留一份，回滚本身也能被回滚。 */
+async function archiveBeforeRestore(filePath) {
+  const dir = dirname(filePath)
+  const stamp = Date.now().toString(36)
+  await copyFile(filePath, join(dir, `notes.pre-restore-${stamp}.json`)).catch(() => undefined)
+  let names
+  try {
+    names = (await readdir(dir)).filter((name) => name.startsWith('notes.pre-restore-')).sort()
+  } catch {
+    return
+  }
+  const extra = names.slice(0, Math.max(0, names.length - MAX_PRE_RESTORE))
+  for (const name of extra) await rm(join(dir, name), { force: true }).catch(() => undefined)
+}
+
+/** 用一份快照覆盖当前便签（回收站保持不动），写入前先留档。 */
+async function restoreSnapshot(name) {
+  const snapshot = await readSnapshot(name)
+  return serialized(async () => {
+    const filePath = await stateFilePath()
+    const doc = await readDoc(filePath)
+    await archiveBeforeRestore(filePath)
+    const version = doc.version + 1
+    await writeDoc(filePath, { version, notes: snapshot.notes, trash: doc.trash })
+    return {
+      version,
+      restoredFrom: name,
+      trash: doc.trash.length,
+    }
+  })
+}
+
 export {
   ASSET_PATTERN,
   ID_PATTERN,
-  MAX_ID,
+  MAX_ASSET_BYTES,
   MAX_NOTES,
-  MAX_NOTE_BODY,
-  MAX_TITLE,
   MAX_TRASH,
-  PAPER_COLORS,
   PAPER_IDS,
-  TRASH_TTL_MS,
+  SNAPSHOT_NAME,
   assetsDir,
   coded,
-  configFilePath,
   createNote,
   defaultDataDir,
   deleteNote,
   emptyTrash,
   getNote,
   listNotes,
+  listSnapshots,
   listTrash,
   messageOf,
   migrateData,
@@ -548,13 +786,13 @@ export {
   readState,
   resolveDataDir,
   restoreNote,
+  restoreSnapshot,
+  salvageNotes,
   sanitizeNote,
   sanitizeNotes,
-  sanitizeTrash,
   serialized,
   stateFilePath,
   updateNote,
-  withDoc,
   writeConfigDir,
   writeDoc,
 }

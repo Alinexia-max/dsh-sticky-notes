@@ -28,17 +28,23 @@ import {
   listTrash,
   messageOf,
   purgeNote,
+  readState,
   restoreNote,
   updateNote,
 } from './store.js'
 
-/** 服务端能接受的 legacy 协议版本（2026-07-28 的 server/discover 暂不实现）。 */
-const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05']
-const FALLBACK_PROTOCOL_VERSION = '2025-06-18'
+/**
+ * 能识别的协议版本，新的在前。客户端报的版本不在表里时，
+ * 按 MCP 约定回自己支持的最新版本，而不是拒绝握手。
+ * （2026-07-28 的 server/discover 仍未实现。）
+ */
+const PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05']
+const FALLBACK_PROTOCOL_VERSION = PROTOCOL_VERSIONS[0]
 
 const INSTRUCTIONS = [
   'Sticky notes stored on this machine by the DSH sticky-notes plugin.',
   'Call notes_list first to discover note ids; every other tool needs an id.',
+  'Every note is also readable as a resource: notes://<id>.',
   'notes_delete moves a note to the trash (recoverable). notes_purge is permanent and requires confirm: true.',
 ].join(' ')
 
@@ -234,6 +240,49 @@ const TOOLS = [
 
 const TOOL_MAP = new Map(TOOLS.map((tool) => [tool.name, tool]))
 
+/* --------------------------------------------------------------- resources */
+
+/**
+ * 每条便签同时暴露成一个资源，客户端可以像读文件一样把它读进上下文。
+ * URI 的 id 部分直接复用 store.js 的字符集，改一处不会漏另一处。
+ */
+const NOTE_URI = new RegExp(`^notes://(${ID_PATTERN.source.slice(1, -1)})$`)
+
+const noteUriOf = (id) => `notes://${id}`
+
+const noteText = (note) => {
+  const title = String(note.title || '').trim()
+  const body = String(note.body || '')
+  return title === '' ? body : `# ${title}\n\n${body}`
+}
+
+async function listResources() {
+  const doc = await readState()
+  return {
+    resources: doc.notes.map((note) => ({
+      uri: noteUriOf(note.id),
+      name: note.title || noteUriOf(note.id),
+      description: note.body.replace(/\s+/g, ' ').trim().slice(0, 120),
+      mimeType: 'text/markdown',
+    })),
+  }
+}
+
+function resourceError(message) {
+  const failure = new Error(message)
+  failure.rpcCode = -32602
+  return failure
+}
+
+async function readResource(uri) {
+  const match = typeof uri === 'string' ? NOTE_URI.exec(uri) : null
+  if (match === null) throw resourceError(`unknown resource: ${String(uri)}`)
+  const doc = await readState()
+  const note = doc.notes.find((item) => item.id === match[1])
+  if (!note) throw resourceError(`note not found: ${match[1]}`)
+  return { contents: [{ uri, mimeType: 'text/markdown', text: noteText(note) }] }
+}
+
 async function serverVersion() {
   try {
     const raw = await readFile(new URL('./package.json', import.meta.url), 'utf8')
@@ -261,12 +310,19 @@ async function handleRequest(message) {
   if (method === 'initialize') {
     return {
       protocolVersion: pickProtocolVersion(message.params && message.params.protocolVersion),
-      capabilities: { tools: { listChanged: false } },
+      capabilities: {
+        tools: { listChanged: false },
+        resources: { listChanged: false, subscribe: false },
+      },
       serverInfo: { name: 'dsh-sticky-notes', version: await packageVersion() },
       instructions: INSTRUCTIONS,
     }
   }
+  // 初始化完成通知是按协议可以收到的无 id 消息，显式吃掉，别落到 -32601。
+  if (method === 'notifications/initialized') return {}
   if (method === 'ping') return {}
+  if (method === 'resources/list') return listResources()
+  if (method === 'resources/read') return readResource((message.params || {}).uri)
   if (method === 'tools/list') return { tools: TOOLS.map(({ name: toolName, description, inputSchema }) => ({ name: toolName, description, inputSchema })) }
   if (method === 'tools/call') {
     const params = message.params || {}
