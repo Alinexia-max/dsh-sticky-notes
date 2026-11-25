@@ -41,6 +41,9 @@ window.__ModuleLoader__.load({
     const SYNC_INTERVAL = 20000
     /** 同一个冲突连续出现这么多次就放弃自动合并，转为报错。 */
     const MAX_CONFLICT_ROUNDS = 4
+    /** 卡片密度偏好：本地设置，只影响看板排版，不进便签数据、不跨设备同步。 */
+    const DENSITY_KEY = 'dsh-sticky-notes:density'
+    const DENSITIES = ['compact', 'comfy']
 
     /** 便签纸配色：id 与 index.js 的白名单、CSS 里的 dsn-palette 区块三处保持一致。 */
     const PAPERS = [
@@ -102,6 +105,11 @@ window.__ModuleLoader__.load({
         imageTooBig: '图片太大（上限 8MB）',
         imageFailed: '图片上传失败',
         shortcutHint: '快捷键：Alt+N 新建 · Ctrl/⌘+F 搜索 · Ctrl/⌘+S 保存',
+        densityTitle: '切换卡片密度',
+        densityCompact: '紧凑',
+        densityComfy: '宽松',
+        groupPinned: '置顶',
+        groupOthers: '其他',
         statusSaving: '保存中…',
         statusPending: '未保存',
         statusSaved: '已保存',
@@ -214,6 +222,11 @@ window.__ModuleLoader__.load({
         imageTooBig: 'Image too large (8MB max)',
         imageFailed: 'Image upload failed',
         shortcutHint: 'Shortcuts: Alt+N new · Ctrl/⌘+F search · Ctrl/⌘+S save',
+        densityTitle: 'Toggle card density',
+        densityCompact: 'Compact',
+        densityComfy: 'Roomy',
+        groupPinned: 'Pinned',
+        groupOthers: 'Others',
         statusSaving: 'Saving…',
         statusPending: 'Unsaved',
         statusSaved: 'Saved',
@@ -315,7 +328,10 @@ window.__ModuleLoader__.load({
 .dsn-panel[data-tone="dark"] .dsn-paper-sky { --dsn-paper: #2f4661; --dsn-paper-head: #385271; --dsn-paper-line: rgba(255, 255, 255, 0.16); --dsn-ink: #ddeaf8; }
 .dsn-panel[data-tone="dark"] .dsn-paper-violet { --dsn-paper: #42345a; --dsn-paper-head: #4c3c67; --dsn-paper-line: rgba(255, 255, 255, 0.16); --dsn-ink: #ece2f8; }
 /* dsn:palette:end */
-.dsn-panel { position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); font-family: inherit; font-size: 13px; line-height: 1.5; }
+.dsn-panel { position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary); font-family: inherit; font-size: 13px; line-height: 1.5;
+  /* 密度只决定默认尺寸与留白：用户手动拖过尺寸的卡片带行内 width/height，永远优先。 */
+  --dsn-card-w: 300px; --dsn-card-minh: 240px; --dsn-board-gap: 18px; --dsn-board-pad: 20px; --dsn-note-line: 1.7; --dsn-body-pad: 12px 16px; }
+.dsn-panel[data-density="compact"] { --dsn-card-w: 268px; --dsn-card-minh: 196px; --dsn-board-gap: 12px; --dsn-board-pad: 14px; --dsn-note-line: 1.55; --dsn-body-pad: 8px 12px; }
 .dsn-toolbar { display: flex; flex: 0 0 auto; flex-wrap: wrap; align-items: center; gap: 8px; min-height: 52px; padding: 8px 16px; border-bottom: 1px solid var(--dsw-alias-border-l1); }
 .dsn-heading { margin: 0; color: var(--dsw-alias-label-primary); font-size: 15px; font-weight: 600; letter-spacing: 0.01em; }
 .dsn-count { color: var(--dsw-alias-label-secondary); font-size: 12px; }
@@ -337,12 +353,15 @@ window.__ModuleLoader__.load({
 .dsn-banner-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dsn-banner-btn { flex: 0 0 auto; padding: 2px 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; background: transparent; color: var(--dsw-alias-label-primary); font: inherit; font-size: 12px; cursor: pointer; }
 .dsn-banner-btn:hover { background: var(--dsw-alias-bg-layer-1); }
-.dsn-board { display: flex; flex: 1 1 auto; flex-wrap: wrap; align-content: flex-start; gap: 18px; min-height: 0; padding: 20px; overflow-y: auto; scrollbar-width: thin; }
+.dsn-board { display: flex; flex: 1 1 auto; flex-wrap: wrap; align-content: flex-start; gap: var(--dsn-board-gap); min-height: 0; padding: var(--dsn-board-pad); overflow-y: auto; scrollbar-width: thin; }
 .dsn-board--empty { align-content: center; justify-content: center; }
 .dsn-board::-webkit-scrollbar { width: 8px; height: 8px; }
 .dsn-board::-webkit-scrollbar-thumb { border-radius: 4px; background: var(--dsw-alias-border-l2); }
 .dsn-board::-webkit-scrollbar-track { background: transparent; }
-.dsn-note { position: relative; display: flex; flex: 0 0 auto; flex-direction: column; width: 300px; min-width: 220px; max-width: 720px; min-height: 240px; max-height: 720px; border-radius: 12px; background: var(--dsn-paper); color: var(--dsn-ink); box-shadow: var(--dsn-shadow); resize: both; overflow: hidden; transition: transform 140ms ease, box-shadow 140ms ease; }
+/* 置顶 / 普通两组之间的小标题：flex-basis 100% 让它独占一整行，不参与卡片换行计算。 */
+.dsn-group { display: flex; flex: 0 0 100%; align-items: baseline; gap: 6px; margin: 0 0 -8px; color: var(--dsw-alias-label-secondary); font-size: 12px; font-weight: 600; letter-spacing: 0.02em; }
+.dsn-group-count { font-weight: 400; font-variant-numeric: tabular-nums; opacity: 0.85; }
+.dsn-note { position: relative; display: flex; flex: 0 0 auto; flex-direction: column; width: var(--dsn-card-w); min-width: 220px; max-width: 720px; min-height: var(--dsn-card-minh); max-height: 720px; border-radius: 12px; background: var(--dsn-paper); color: var(--dsn-ink); box-shadow: var(--dsn-shadow); resize: both; overflow: hidden; transition: transform 140ms ease, box-shadow 140ms ease; }
 .dsn-note:hover { transform: translateY(-1px); }
 .dsn-note[data-focus="true"] { box-shadow: var(--dsn-shadow-lift); }
 /* 置顶的卡片常驻抬起阴影，方便一眼分辨「钉在最上面」的那几张。 */
@@ -352,11 +371,11 @@ window.__ModuleLoader__.load({
 .dsn-note[data-drop]::after { content: ''; position: absolute; z-index: 4; top: 6px; bottom: 6px; width: 3px; border-radius: 2px; background: var(--dsw-alias-brand-primary); }
 .dsn-note[data-drop="before"]::after { left: 3px; }
 .dsn-note[data-drop="after"]::after { right: 3px; }
-.dsn-note-head { display: flex; flex: 0 0 auto; align-items: center; gap: 2px; min-height: 36px; padding: 0 6px 0 4px; background: var(--dsn-paper-head); border-bottom: 1px solid var(--dsn-paper-line); border-radius: 12px 12px 0 0; }
+.dsn-note-head { display: flex; flex: 0 0 auto; align-items: center; gap: 2px; min-height: 32px; padding: 0 6px 0 4px; background: var(--dsn-paper-head); border-bottom: 1px solid var(--dsn-paper-line); border-radius: 12px 12px 0 0; }
 .dsn-drag { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; width: 20px; height: 24px; margin-left: -2px; color: inherit; font-size: 13px; opacity: 0.35; cursor: grab; user-select: none; }
 .dsn-drag:active { cursor: grabbing; }
 .dsn-drag:hover { opacity: 1; }
-.dsn-note-title { flex: 1 1 auto; min-width: 0; padding: 9px 0; border: 0; background: transparent; color: inherit; font: inherit; font-size: 13px; font-weight: 600; text-overflow: ellipsis; outline: none; }
+.dsn-note-title { flex: 1 1 auto; min-width: 0; padding: 7px 0; border: 0; background: transparent; color: inherit; font: inherit; font-size: 14px; font-weight: 600; letter-spacing: 0.01em; text-overflow: ellipsis; outline: none; }
 .dsn-note-title::placeholder, .dsn-note-body::placeholder { color: var(--dsn-ink); opacity: 0.42; }
 .dsn-icon-btn { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: inherit; font: inherit; font-size: 15px; line-height: 1; opacity: 0.55; cursor: pointer; }
 .dsn-icon-btn:hover { background: var(--dsn-paper-line); opacity: 1; }
@@ -366,21 +385,21 @@ window.__ModuleLoader__.load({
 .dsn-icon-btn--pin[data-pinned="true"] { opacity: 1; }
 .dsn-icon-btn--pin[data-pinned="false"] { opacity: 0.35; }
 .dsn-icon-btn--pin[data-pinned="false"]:hover { opacity: 1; }
-.dsn-note-body { flex: 1 1 auto; width: 100%; min-height: 150px; padding: 10px 14px; border: 0; background: transparent; color: inherit; font: inherit; line-height: 1.7; resize: none; outline: none; scrollbar-width: thin; }
+.dsn-note-body { flex: 1 1 auto; width: 100%; min-height: 120px; padding: var(--dsn-body-pad); border: 0; background: transparent; color: inherit; font: inherit; line-height: var(--dsn-note-line); resize: none; outline: none; scrollbar-width: thin; }
 .dsn-note-body::-webkit-scrollbar { width: 6px; }
 .dsn-note-body::-webkit-scrollbar-thumb { border-radius: 3px; background: var(--dsn-paper-line); }
 .dsn-note-body::-webkit-scrollbar-track { background: transparent; }
 .dsn-note-attach { display: flex; flex: 0 0 auto; flex-wrap: wrap; gap: 6px; padding: 0 12px 8px; }
-.dsn-thumb { display: block; width: 56px; height: 42px; border: 1px solid var(--dsn-paper-line); border-radius: 6px; object-fit: cover; }
+.dsn-thumb { display: block; width: 76px; height: 56px; border: 1px solid var(--dsn-paper-line); border-radius: 8px; object-fit: cover; }
 .dsn-chip { max-width: 100%; padding: 2px 8px; border-radius: 999px; background: var(--dsn-paper-line); color: inherit; font-size: 11px; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dsn-chip:hover { text-decoration: underline; }
-.dsn-todo { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; cursor: pointer; }
+.dsn-todo { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 13px; cursor: pointer; }
 .dsn-todo-check { flex: 0 0 auto; width: 13px; height: 13px; margin: 0; accent-color: var(--dsn-ink); cursor: pointer; }
 .dsn-todo-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dsn-todo-text[data-done="true"] { text-decoration: line-through; opacity: 0.55; }
 /* 正文里的管道表格：只读渲染 + 点格就地编辑，颜色全走纸张变量，暗色自动跟随。 */
 /* 预览态：正文按块渲染，表格就是表格，不再重复显示管道原文。 */
-.dsn-preview { display: flex; flex: 1 1 auto; flex-direction: column; gap: 6px; width: 100%; min-height: 150px; padding: 10px 14px; overflow: auto; line-height: 1.7; cursor: text; scrollbar-width: thin; }
+.dsn-preview { display: flex; flex: 1 1 auto; flex-direction: column; gap: 6px; width: 100%; min-height: 120px; padding: var(--dsn-body-pad); overflow: auto; line-height: var(--dsn-note-line); cursor: text; scrollbar-width: thin; }
 .dsn-preview-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .dsn-preview-todo { margin: 0; }
 .dsn-preview-empty { opacity: 0.45; }
@@ -397,17 +416,17 @@ window.__ModuleLoader__.load({
 .dsn-preview-list { margin: 0; padding-left: 18px; }
 .dsn-preview-list li { overflow-wrap: anywhere; }
 .dsn-table-wrap { max-width: 100%; overflow-x: auto; scrollbar-width: thin; }
-.dsn-table { border-collapse: collapse; font-size: 11px; }
-.dsn-table th, .dsn-table td { padding: 3px 6px; border: 1px solid var(--dsn-paper-line); text-align: left; vertical-align: top; }
-/* 单格超长文本在 160px 处截断，避免一格把整张表撑爆。 */
-.dsn-table-text { display: block; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsn-table { border-collapse: collapse; font-size: 12px; }
+.dsn-table th, .dsn-table td { padding: 4px 8px; border: 1px solid var(--dsn-paper-line); text-align: left; vertical-align: top; }
+/* 单格超长文本截断：小窗口下跟着视口缩，避免一格把整张表撑爆。 */
+.dsn-table-text { display: block; max-width: min(160px, 40vw); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dsn-table th { background: var(--dsn-paper-head); font-weight: 600; }
 .dsn-table td { cursor: text; }
 .dsn-table td:hover { background: var(--dsn-paper-line); }
 .dsn-table td:focus-visible { outline: 2px solid var(--dsn-ink); outline-offset: -2px; }
 .dsn-table-cell--editing { padding: 0; }
-.dsn-table-input { width: 100%; min-width: 64px; padding: 3px 6px; border: 0; background: var(--dsn-paper); color: var(--dsn-ink); font: inherit; outline: none; }
-.dsn-note-foot { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; padding: 0 14px 10px; color: inherit; font-size: 11px; opacity: 0.55; }
+.dsn-table-input { width: 100%; min-width: 72px; padding: 4px 8px; border: 0; background: var(--dsn-paper); color: var(--dsn-ink); font: inherit; outline: none; }
+.dsn-note-foot { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; padding: 0 16px 10px; color: inherit; font-size: 11px; opacity: 0.55; }
 .dsn-note-count { margin-left: auto; font-variant-numeric: tabular-nums; }
 .dsn-note-foot[data-limit="true"] { opacity: 0.85; font-weight: 600; }
 .dsn-menu { position: absolute; z-index: 3; top: 40px; right: 8px; display: flex; flex-direction: column; gap: 6px; min-width: 132px; padding: 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px; background: var(--dsw-alias-bg-overlay, var(--dsw-alias-bg-layer-1)); box-shadow: var(--dsn-shadow-lift); }
@@ -472,6 +491,28 @@ window.__ModuleLoader__.load({
         return new URL(path.slice(1), base).href
       } catch {
         return path
+      }
+    }
+
+    /**
+     * 卡片密度偏好：存 localStorage（本地设置，不进便签数据）。
+     * 隐私模式或旧环境拿不到存储时退回「宽松」，不影响使用。
+     */
+    function readDensity() {
+      try {
+        const value = window.localStorage.getItem(DENSITY_KEY)
+        if (DENSITIES.indexOf(value) >= 0) return value
+      } catch {
+        // 存储被禁用。
+      }
+      return 'comfy'
+    }
+
+    function writeDensity(value) {
+      try {
+        window.localStorage.setItem(DENSITY_KEY, value)
+      } catch {
+        // 写不进去只是下次打开回到默认，当前会话照常。
       }
     }
 
@@ -1697,6 +1738,8 @@ window.__ModuleLoader__.load({
       const [menuId, setMenuId] = useState(null)
       const [query, setQuery] = useState('')
       const [sort, setSort] = useState('manual')
+      /** 看板密度：compact（紧凑）/ comfy（宽松），记在 localStorage。 */
+      const [density, setDensity] = useState(readDensity)
       /** 删除后待撤销的便签 { note, index }。 */
       const [undoEntry, setUndoEntry] = useState(null)
       const [tone, setTone] = useState('light')
@@ -2782,6 +2825,13 @@ window.__ModuleLoader__.load({
         void flushRef.current()
       }, [])
 
+      /** 紧凑 / 宽松互换：只写本地偏好，看板由 CSS 变量重新排版。 */
+      const toggleDensity = useCallback(() => {
+        const next = density === 'compact' ? 'comfy' : 'compact'
+        writeDensity(next)
+        setDensity(next)
+      }, [density])
+
       const matchCounts = useMemo(() => {
         const counts = new Map()
         const keyword = query.trim().toLowerCase()
@@ -2875,10 +2925,30 @@ window.__ModuleLoader__.load({
       } else if (visible.length === 0) {
         board = h('div', { className: 'dsn-empty' }, h('div', { className: 'dsn-empty-body' }, t('searchEmpty')))
       } else {
-        board = cards
+        // 置顶与普通便签分成两段：两组都在时各插一行小标题，只有一组时省掉这行空白。
+        const pinnedCount = visible.filter((note) => note.pinned === true).length
+        if (pinnedCount > 0 && pinnedCount < visible.length) {
+          const groupEl = (key, label, count) =>
+            h(
+              'div',
+              { key, className: 'dsn-group' },
+              label,
+              h('span', { className: 'dsn-group-count' }, String(count)),
+            )
+          board = [
+            groupEl('group-pinned', t('groupPinned'), pinnedCount),
+            ...cards.slice(0, pinnedCount),
+            groupEl('group-others', t('groupOthers'), visible.length - pinnedCount),
+            ...cards.slice(pinnedCount),
+          ]
+        } else {
+          board = cards
+        }
       }
 
       const showBoard = loaded && visible.length > 0
+      // 密度按钮显示当前值，点一下切到另一种。
+      const densityLabel = density === 'compact' ? t('densityCompact') : t('densityComfy')
 
       return h(
         Fragment,
@@ -2886,7 +2956,7 @@ window.__ModuleLoader__.load({
         h('style', { key: 'dsn-style' }, CSS),
         h(
           'div',
-          { className: 'dsn-panel', 'data-tone': tone, ref: panelRef },
+          { className: 'dsn-panel', 'data-tone': tone, 'data-density': density, ref: panelRef },
           h(
             'header',
             { className: 'dsn-toolbar' },
@@ -2911,6 +2981,17 @@ window.__ModuleLoader__.load({
                 onChange: (event) => setSort(event.target.value),
               },
               SORTS.map((option) => h('option', { key: option.id, value: option.id }, t(option.label))),
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsn-btn',
+                title: t('densityTitle'),
+                'aria-label': t('densityTitle'),
+                onClick: toggleDensity,
+              },
+              densityLabel,
             ),
             h(
               'button',
